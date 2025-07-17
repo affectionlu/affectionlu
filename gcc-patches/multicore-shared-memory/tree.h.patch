@@ -1,0 +1,22 @@
+--- a/gcc/tree.h
++++ b/gcc/tree.h
+@@ -2900,6 +2900,10 @@ extern tree decl_value_expr_lookup (tree);
+ extern void decl_value_expr_insert (tree, tree);
+ 
+ /* Checks if expression is constant expression zero */
++
++/* In a VAR_DECL, nonzero if the variable is marked as mem_shared */
++#define DECL_MEM_SHARED_P(NODE) \
++  (DECL_WITH_VIS_CHECK (NODE)->decl_with_vis.mem_shared_flag)
+ extern bool initializer_zerop (const_tree);
+ extern bool initializer_each_zero_or_onep (const_tree);
+ extern tree error_mark_node;
+@@ -3150,6 +3154,8 @@ struct GTY(()) tree_decl_with_vis {
+  unsigned cxx_constructor : 1;
+  /* Var or Function is deleted.  */
+  unsigned cxx_destructor : 1;
++ /* Variable is marked with mem_shared keyword.  */
++ unsigned mem_shared_flag : 1;
+  /* Used by C++ only.  Might become a generic decl flag.  */
+  unsigned shadowed_for_var_p : 1;
+  /* For VAR_DECL, PARM_DECL or RESULT_DECL: Set when DECL is used in

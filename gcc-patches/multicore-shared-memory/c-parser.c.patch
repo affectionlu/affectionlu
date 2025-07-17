@@ -1,0 +1,31 @@
+--- a/gcc/c/c-parser.c
++++ b/gcc/c/c-parser.c
+@@ -2756,6 +2756,20 @@ c_parser_declspecs (c_parser *parser, struct c_declspecs *specs,
+ 	  c_parser_consume_token (parser);
+ 	  goto split_specs_attrs;
+ 	  break;
++	case RID_MEM_SHARED:
++	  {
++	    tree attr_list = build_tree_list (get_identifier ("mem_shared"), NULL_TREE);
++	    tree attr_spec = build_tree_list (NULL_TREE, attr_list);
++	    declspecs_add_attrs (loc, specs, attr_spec);
++	    
++	    /* Mark this declaration as using mem_shared */
++	    specs->mem_shared_p = true;
++	    
++	    c_parser_consume_token (parser);
++	    goto split_specs_attrs;
++	  }
++	  break;
++	  
+ 	case RID_THREAD:
+ 	  /* This is handled using attrs, but we need to check for
+ 	     conflicting thread storage class specifiers.  */
+@@ -3024,6 +3038,7 @@ c_parser_declspecs (c_parser *parser, struct c_declspecs *specs,
+   specs->attrs = chainon (attrs, specs->attrs);
+   return specs;
+  split_specs_attrs:
++  /* Handle mem_shared attribute processing */
+   *split_spec_attrs = attrs;
+   specs->attrs = chainon (attrs, specs->attrs);
+   return specs;

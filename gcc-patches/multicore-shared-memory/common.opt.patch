@@ -1,0 +1,21 @@
+--- a/gcc/common.opt
++++ b/gcc/common.opt
+@@ -1750,6 +1750,18 @@ fmax-errors=
+ Common Joined RejectNegative UInteger Var(flag_max_errors)
+ -fmax-errors=<number>	Maximum number of errors to report.
+ 
++fmem-shared
++Common Report Var(flag_mem_shared)
++Enable mem_shared keyword support for multicore shared memory.
++
++fmem-shared-cores=
++Common Joined UInteger Var(mem_shared_num_cores) Init(1)
++-fmem-shared-cores=<number>	Specify number of cores for mem_shared allocation.
++
++fdump-mem-shared
++Common Report Var(flag_debug_mem_shared)
++Dump mem_shared allocation information to stderr.
++
+ fmem-report
+ Common Report Var(mem_report)
+ Report on permanent memory allocation.
