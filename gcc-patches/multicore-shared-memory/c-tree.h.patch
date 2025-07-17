@@ -1,0 +1,33 @@
+--- a/gcc/c/c-tree.h
++++ b/gcc/c/c-tree.h
+@@ -270,6 +270,8 @@ struct c_declspecs {
+   BOOL_BITFIELD thread_p : 1;
+   /* Whether any of the input specifiers were (explicitly) "_Atomic". */
+   BOOL_BITFIELD atomic_p : 1;
++  /* Whether the declaration uses mem_shared keyword. */
++  BOOL_BITFIELD mem_shared_p : 1;
+   /* The address space that the declaration specifiers refer to.  */
+   addr_space_t address_space;
+ };
+@@ -671,6 +673,9 @@ extern void c_finish_incomplete_decl (tree);
+ extern tree c_omp_reduction_id (enum tree_code, tree);
+ extern tree c_omp_reduction_decl (tree);
+ extern tree c_omp_reduction_lookup (tree, tree);
++
++/* mem_shared support functions */
++extern void c_mem_shared_process_decl (tree);
+ extern tree c_check_omp_declare_reduction_r (tree *, int *, void *);
+ extern void c_pushtag (location_t, tree, tree);
+ extern tree c_bind_vars_to_tree (tree, tree);
+@@ -710,6 +715,11 @@ extern void c_print_identifier (FILE *, tree, int);
+ extern bool c_warn_unused_global_decl (const_tree);
+ extern bool c_write_global_declarations_1 (tree);
+ extern void c_write_global_declarations (void);
++
++/* mem_shared memory allocation tracking */
++extern void mem_shared_register_allocation (tree decl, unsigned int core,
++                                          unsigned int offset, unsigned int size);
++extern bool mem_shared_is_distributed (tree decl);
+ extern bool c_warn_unused_global_decl (const_tree);
+ extern void pedwarn_c90 (location_t, int, const char *, ...)
+   ATTRIBUTE_GCC_DIAG(3,4);

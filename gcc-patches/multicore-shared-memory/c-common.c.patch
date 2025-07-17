@@ -1,0 +1,34 @@
+--- a/gcc/c-family/c-common.c
++++ b/gcc/c-family/c-common.c
+@@ -340,6 +340,7 @@ const struct c_common_resword c_common_reswords[] =
+   { "long",		RID_LONG,	0 },
+   { "register",		RID_REGISTER,	0 },
+   { "restrict",		RID_RESTRICT,	D_CONLY | D_C99 },
++  { "mem_shared",	RID_MEM_SHARED,	D_CONLY | D_MEM_SHARED },
+   { "return",		RID_RETURN,	0 },
+   { "short",		RID_SHORT,	0 },
+   { "signed",		RID_SIGNED,	0 },
+@@ -8750,6 +8751,14 @@ handle_deprecated_attribute (tree *node, tree name,
+   return NULL_TREE;
+ }
+ 
++/* Handle a "mem_shared" attribute; arguments as in struct attribute_spec.handler. */
++static tree
++handle_mem_shared_attribute (tree *node, tree name, tree args,
++                            int flags, bool *no_add_attrs)
++{
++  return NULL_TREE;
++}
++
+ /* Handle a "vector_size" attribute; arguments as in
+    struct attribute_spec.handler.  */
+ 
+@@ -9950,6 +9959,8 @@ static const struct attribute_spec c_common_attributes[] =
+ 			      handle_deprecated_attribute, NULL },
+   { "vector_size",	      1, 1, false, true, false, false,
+ 			      handle_vector_size_attribute, NULL },
++  { "mem_shared",             0, 0, false, true, false, false,
++                             handle_mem_shared_attribute, NULL },
+   { "visibility",	      1, 1, false, false, false, false,
+ 			      handle_visibility_attribute, NULL },
+   { "tls_model",	      1, 1, true, false, false, false,
