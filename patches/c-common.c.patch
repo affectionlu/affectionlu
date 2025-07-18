@@ -1,0 +1,27 @@
+--- a/gcc/c-family/c-common.c
++++ b/gcc/c-family/c-common.c
+@@ -362,6 +362,7 @@ const struct c_common_resword c_common_reswords[] =
+   { "typeof",		RID_TYPEOF,	D_ASM|D_EXT },
+   { "typeof_unqual",	RID_TYPEOF_UNQUAL, D_CONLY },
+   { "union",		RID_UNION,	0 },
++  { "mem_shared",	RID_MEM_SHARED,	D_CONLY },
+   { "unsigned",		RID_UNSIGNED,	0 },
+   { "using",		RID_USING,	D_CXX },
+   { "void",		RID_VOID,	0 },
+@@ -5458,6 +5459,15 @@ c_common_finalize_early_debug (void)
+   timevar_pop (TV_PCH_SAVE);
+ }
+ 
++/* Initialize mem_shared support */
++void
++c_common_init_mem_shared (void)
++{
++  if (flag_mem_shared)
++    {
++      mem_shared_init (mem_shared_num_cores);
++    }
++}
++
+ /* Preprocess and parse the file.  */
+ void
+ c_common_parse_file (void)
