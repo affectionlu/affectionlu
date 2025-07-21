@@ -1,0 +1,37 @@
+--- a/gcc/toplev.c
++++ b/gcc/toplev.c
+@@ -84,6 +84,7 @@
+ #include "ipa-fnsummary.h"
+ #include "dump-context.h"
+ #include "optinfo-emit-json.h"
++#include "mem-shared.h"
+ 
+ #if defined(DBX_DEBUGGING_INFO) || defined(XCOFF_DEBUGGING_INFO)
+ #include "dbxout.h"
+@@ -1825,6 +1826,13 @@ backend_init_target (void)
+ static void
+ backend_init (void)
+ {
++  /* Initialize mem_shared subsystem if enabled */
++  if (flag_mem_shared)
++    {
++      unsigned int num_groups = (mem_shared_core_num + 1) / 2;
++      mem_shared_init (num_groups, mem_shared_core_size);
++    }
++
+   init_emit_once ();
+ 
+   init_rtlanal ();
+@@ -2151,6 +2159,12 @@ lang_dependent_init (const char *name)
+   /* Language-dependent initialization. Returns true on success. */
+   if (lang_dependent_init (main_input_filename))
+     {
++      /* Register mem_shared cleanup on successful initialization */
++      if (flag_mem_shared)
++        {
++          atexit (mem_shared_cleanup);
++        }
++
+       /* Initialize yet another pass. */
+ 
+       ggc_protect_identifiers = true;
