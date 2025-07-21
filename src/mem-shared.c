@@ -205,40 +205,46 @@ mem_shared_get_best_core_in_group (unsigned int group_id, unsigned int size)
   return best_core;
 }
 
-/* Distribute large data across multiple groups */
+/* Distribute large data across multiple cores */
 void
 mem_shared_distribute_data (mem_shared_info_t *info, unsigned int total_size)
 {
-  unsigned int chunk_size, i;
+  unsigned int chunk_size, i, core_id, group_id, intra_id;
   
-  /* Calculate chunk size (distribute evenly across all groups) */
-  chunk_size = (total_size + mem_shared_num_groups - 1) / mem_shared_num_groups;
+  /* Calculate chunk size (distribute evenly across all participating cores) */
+  chunk_size = (total_size + mem_shared_total_cores - 1) / mem_shared_total_cores;
   
   info->is_distributed = true;
-  info->num_chunks = mem_shared_num_groups;
+  info->num_chunks = mem_shared_total_cores;  /* One chunk per core */
   info->chunk_size = chunk_size;
   info->target_group = 0;  /* Start from group 0 */
-  info->intra_group_id = 0; /* Use first core in each group by default */
+  info->intra_group_id = 0; /* Start from core 0 in group 0 */
   
-  /* Update memory usage for all participating groups */
-  for (i = 0; i < mem_shared_num_groups; i++)
+  /* Update memory usage for all participating cores */
+  for (i = 0; i < mem_shared_total_cores; i++)
     {
       unsigned int actual_chunk_size = chunk_size;
       
+      /* Calculate which group and intra-group ID this core belongs to */
+      group_id = i / CORES_PER_GROUP;     /* i / 2 */
+      intra_id = i % CORES_PER_GROUP;     /* i % 2 */
+      
       /* Adjust last chunk size */
-      if (i == mem_shared_num_groups - 1)
-        actual_chunk_size = total_size - (chunk_size * (mem_shared_num_groups - 1));
+      if (i == mem_shared_total_cores - 1)
+        actual_chunk_size = total_size - (chunk_size * (mem_shared_total_cores - 1));
         
-      if (mem_shared_group_info[i].free_memory[0] >= actual_chunk_size)
+      /* Update memory usage for this specific core */
+      if (group_id < mem_shared_num_groups && 
+          mem_shared_group_info[group_id].free_memory[intra_id] >= actual_chunk_size)
         {
-          mem_shared_group_info[i].used_memory[0] += actual_chunk_size;
-          mem_shared_group_info[i].free_memory[0] -= actual_chunk_size;
+          mem_shared_group_info[group_id].used_memory[intra_id] += actual_chunk_size;
+          mem_shared_group_info[group_id].free_memory[intra_id] -= actual_chunk_size;
         }
     }
     
   if (flag_dump_mem_shared)
-    fprintf (stderr, "[mem_shared] Distributed %u bytes across %u groups, %u bytes per chunk\n",
-            total_size, mem_shared_num_groups, chunk_size);
+    fprintf (stderr, "[mem_shared] Distributed %u bytes across %u cores (%u groups), %u bytes per chunk\n",
+            total_size, mem_shared_total_cores, mem_shared_num_groups, chunk_size);
 }
 
 /* Allocate memory for a mem_shared variable */
@@ -340,7 +346,7 @@ unsigned int
 mem_shared_calculate_target_group (tree decl, HOST_WIDE_INT offset)
 {
   mem_shared_info_t *info;
-  unsigned int chunk_index;
+  unsigned int chunk_index, target_core;
   
   info = mem_shared_get_info (decl);
   if (!info)
@@ -349,9 +355,12 @@ mem_shared_calculate_target_group (tree decl, HOST_WIDE_INT offset)
   if (!info->is_distributed)
     return info->target_group;
     
-  /* Calculate which chunk this offset falls into */
+  /* Calculate which core this offset falls into */
   chunk_index = offset / info->chunk_size;
-  return (info->target_group + chunk_index) % mem_shared_num_groups;
+  target_core = chunk_index % mem_shared_total_cores;
+  
+  /* Convert core ID to group ID */
+  return target_core / CORES_PER_GROUP;
 }
 
 /* Calculate intra-group ID for access */
@@ -359,14 +368,21 @@ unsigned int
 mem_shared_calculate_intra_group_id (tree decl, HOST_WIDE_INT offset)
 {
   mem_shared_info_t *info;
+  unsigned int chunk_index, target_core;
   
   info = mem_shared_get_info (decl);
   if (!info)
     return 0;
     
-  /* For distributed data, use core 0 in each group by default */
-  /* For single allocation, use the allocated core */
-  return info->intra_group_id;
+  if (!info->is_distributed)
+    return info->intra_group_id;
+    
+  /* Calculate which core this offset falls into */
+  chunk_index = offset / info->chunk_size;
+  target_core = chunk_index % mem_shared_total_cores;
+  
+  /* Convert core ID to intra-group ID */
+  return target_core % CORES_PER_GROUP;
 }
 
 /* Calculate local offset within target core */

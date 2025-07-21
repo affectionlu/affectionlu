@@ -103,24 +103,24 @@ void demonstrate_small_data(void)
 void demonstrate_large_data_distribution(void)
 {
     printf("=== Large Data Distribution Demo ===\n");
-    printf("Large data (>= 10KB) is distributed across all participating groups.\n");
-    printf("Each group gets approximately equal chunks of the data.\n\n");
+    printf("Large data (>= 10KB) is distributed across all participating cores.\n");
+    printf("Each core gets approximately equal chunks of the data.\n\n");
     
     /* Initialize distributed data */
     
-    // Initialize large matrix (32KB distributed)
+    // Initialize large matrix (32KB distributed across 108 cores)
     for (int i = 0; i < 64; i++) {
         for (int j = 0; j < 64; j++) {
             large_matrix[i][j] = (double)(i + j) / 100.0;
         }
     }
     
-    // Initialize huge array (32KB distributed)
+    // Initialize huge array (32KB distributed across 108 cores)
     for (int i = 0; i < 8192; i++) {
         huge_array[i] = i * i;
     }
     
-    // Initialize big buffer (50KB distributed)
+    // Initialize big buffer (50KB distributed across 108 cores)
     memset(big_buffer, 0xAB, sizeof(big_buffer));
     
     printf("large_matrix[30][40] = %.6f\n", large_matrix[30][40]);
@@ -128,10 +128,10 @@ void demonstrate_large_data_distribution(void)
     printf("big_buffer[25000] = 0x%02X\n", (unsigned char)big_buffer[25000]);
     
     printf("\nDistribution characteristics:\n");
-    printf("- Data split into chunks across all %u participating groups\n", 54);
-    printf("- Each group stores approximately: size / num_groups bytes\n");
-    printf("- Access to element calculates: target_group = (offset / chunk_size) %% num_groups\n");
-    printf("- Within group, typically uses first core (intra_id = 0)\n\n");
+    printf("- Data split into chunks across all %u participating cores\n", 108);
+    printf("- Each core stores approximately: size / num_cores bytes\n");
+    printf("- Access to element calculates: target_core = (offset / chunk_size) %% num_cores\n");
+    printf("- Target group = target_core / 2, intra_id = target_core %% 2\n\n");
 }
 
 void demonstrate_intrinsic_operations(void)
@@ -144,7 +144,7 @@ void demonstrate_intrinsic_operations(void)
     /* memset on distributed data */
     printf("Executing: memset(huge_array, 0, sizeof(huge_array));\n");
     memset(huge_array, 0, sizeof(huge_array));
-    printf("Compiler generates ~54 memset calls (one per participating group)\n\n");
+    printf("Compiler generates ~108 memset calls (one per participating core)\n\n");
     
     /* memcpy from regular to distributed */
     for (int i = 0; i < 8192; i++) {
@@ -153,12 +153,12 @@ void demonstrate_intrinsic_operations(void)
     
     printf("Executing: memcpy(huge_array, regular_buffer, sizeof(huge_array));\n");
     memcpy(huge_array, regular_buffer, sizeof(huge_array));
-    printf("Compiler generates ~54 memcpy calls to distribute regular_buffer\n\n");
+    printf("Compiler generates ~108 memcpy calls to distribute regular_buffer\n\n");
     
     /* memcpy from distributed to regular */
     printf("Executing: memcpy(regular_buffer, huge_array, sizeof(regular_buffer));\n");
     memcpy(regular_buffer, huge_array, sizeof(regular_buffer));
-    printf("Compiler generates ~54 memcpy calls to gather from distributed data\n\n");
+    printf("Compiler generates ~108 memcpy calls to gather from distributed data\n\n");
     
     /* Verify operation */
     printf("Verification: huge_array[100] = %d (should be 1100)\n", huge_array[100]);
@@ -284,20 +284,23 @@ Expected compiler output with -fdump-mem-shared:
 [mem_shared] Allocated 2048 bytes for 'lookup_table' in group 6 core 1 at offset 0x0
 [mem_shared] Allocated 3000 bytes for 'message' in group 7 core 0 at offset 0x829
 [mem_shared] Allocated 4096 bytes for 'matrix_2d' in group 8 core 1 at offset 0x800
-[mem_shared] Distributed 32768 bytes across 54 groups, 607 bytes per chunk
-[mem_shared] Distributed 32768 bytes across 54 groups, 607 bytes per chunk  
-[mem_shared] Distributed 50000 bytes across 54 groups, 926 bytes per chunk
+[mem_shared] Distributed 32768 bytes across 108 cores (54 groups), 303 bytes per chunk
+[mem_shared] Distributed 32768 bytes across 108 cores (54 groups), 303 bytes per chunk  
+[mem_shared] Distributed 50000 bytes across 108 cores (54 groups), 463 bytes per chunk
 
 Load/Store operations:
 [mem_shared] Load from 'counter' group 0 intra 0 offset 0x0
 [mem_shared] Store to 'coefficient' group 1 intra 0 offset 0x0
-[mem_shared] Load from 'large_matrix' group 15 intra 0 offset 0x1A8
-[mem_shared] Store to 'huge_array' group 20 intra 0 offset 0x190
+[mem_shared] Load from 'large_matrix' group 15 intra 1 offset 0x12F
+[mem_shared] Store to 'huge_array' group 20 intra 0 offset 0x12F
 
 Intrinsic operations:
-[mem_shared] Replaced memset call (regular to mem_shared) with 54 chunk operations
-[mem_shared] Generated memset for group 0, intra 0, offset 0x0, size 607
-[mem_shared] Generated memset for group 1, intra 0, offset 0x0, size 607
+[mem_shared] Replaced memset call (regular to mem_shared) with 108 chunk operations
+[mem_shared] Generated memset chunk: target group 0 intra 0 offset 0x0, size 303
+[mem_shared] Generated memset chunk: target group 0 intra 1 offset 0x0, size 303
+[mem_shared] Generated memset chunk: target group 1 intra 0 offset 0x0, size 303
+[mem_shared] Generated memset chunk: target group 1 intra 1 offset 0x0, size 303
 ...
-[mem_shared] Generated memset for group 53, intra 0, offset 0x0, size 607
+[mem_shared] Generated memset chunk: target group 53 intra 0 offset 0x0, size 303
+[mem_shared] Generated memset chunk: target group 53 intra 1 offset 0x0, size 303
 */

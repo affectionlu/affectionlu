@@ -154,13 +154,20 @@ unsigned int mem_shared_get_best_group(unsigned int size) {
 ```c
 // 分布式分配算法
 void mem_shared_distribute_data(mem_shared_info_t *info, unsigned int total_size) {
-    unsigned int chunk_size = (total_size + mem_shared_num_groups - 1) / mem_shared_num_groups;
+    unsigned int chunk_size = (total_size + mem_shared_total_cores - 1) / mem_shared_total_cores;
     
     info->is_distributed = true;
-    info->num_chunks = mem_shared_num_groups;
+    info->num_chunks = mem_shared_total_cores;  // 108个核心，每个一块
     info->chunk_size = chunk_size;
     info->target_group = 0;  // 从组0开始
-    info->intra_group_id = 0; // 默认使用每组的第一个核心
+    info->intra_group_id = 0; // 从核心0开始
+    
+    // 更新每个核心的内存使用情况
+    for (i = 0; i < mem_shared_total_cores; i++) {
+        group_id = i / CORES_PER_GROUP;     // 计算组号
+        intra_id = i % CORES_PER_GROUP;     // 计算组内ID
+        // 更新对应核心的内存使用
+    }
 }
 ```
 
@@ -242,14 +249,17 @@ gcc -fmem-shared -fmem-shared-core-num=16 -fmem-shared-core-size=1024 program.c
 ##### memset操作
 ```c
 // 用户代码
-mem_shared int large_array[8192];  // 32KB，分布到54组
+mem_shared int large_array[8192];  // 32KB，分布到108个核心
 memset(large_array, 0, sizeof(large_array));
 
 // 编译器生成（简化显示）
-memset((void*)0x20000000, 0, 607);  // 组0，607字节
-memset((void*)0x20400000, 0, 607);  // 组1，607字节
-// ... 共54个调用
-memset((void*)0x26A00000, 0, 607);  // 组53，607字节
+memset((void*)0x20000000, 0, 303);  // 核心0（组0核心0），303字节
+memset((void*)0x20100000, 0, 303);  // 核心1（组0核心1），303字节
+memset((void*)0x20400000, 0, 303);  // 核心2（组1核心0），303字节
+memset((void*)0x20500000, 0, 303);  // 核心3（组1核心1），303字节
+// ... 共108个调用
+memset((void*)0x26A00000, 0, 303);  // 核心106（组53核心0），303字节
+memset((void*)0x26B00000, 0, 303);  // 核心107（组53核心1），303字节
 ```
 
 ##### memcpy操作
@@ -259,10 +269,12 @@ mem_shared int src_array[8192];
 mem_shared int dst_array[8192];
 memcpy(dst_array, src_array, sizeof(src_array));
 
-// 编译器生成（组对组复制）
-memcpy((void*)0x20000000, (void*)0x20001000, 607);  // 组0→组0
-memcpy((void*)0x20400000, (void*)0x20401000, 607);  // 组1→组1
-// ... 共54个调用
+// 编译器生成（核心对核心复制）
+memcpy((void*)0x20000000, (void*)0x20001000, 303);  // 核心0→核心0
+memcpy((void*)0x20100000, (void*)0x20101000, 303);  // 核心1→核心1
+memcpy((void*)0x20400000, (void*)0x20401000, 303);  // 核心2→核心2
+memcpy((void*)0x20500000, (void*)0x20501000, 303);  // 核心3→核心3
+// ... 共108个调用
 ```
 
 ### 性能影响分析
@@ -272,9 +284,9 @@ memcpy((void*)0x20400000, (void*)0x20401000, 607);  // 组1→组1
 | 单组→单组 | 1 | 无影响 | 小数据操作 |
 | 常规→单组 | 1 | 无影响 | 初始化 |
 | 单组→常规 | 1 | 无影响 | 结果收集 |
-| 常规→分布 | 54 | 中等影响 | 数据分发 |
-| 分布→常规 | 54 | 中等影响 | 数据收集 |
-| 分布→分布 | 54 | 较大影响 | 大数据处理 |
+| 常规→分布 | 108 | 中等影响 | 数据分发 |
+| 分布→常规 | 108 | 中等影响 | 数据收集 |
+| 分布→分布 | 108 | 较大影响 | 大数据处理 |
 
 ## 🔍 调试和诊断
 
