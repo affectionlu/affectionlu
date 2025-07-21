@@ -38,15 +38,17 @@ typedef enum {
   MEM_SHARED_INTRINSIC_UNKNOWN
 } mem_shared_intrinsic_type_t;
 
-/* Chunk operation descriptor for distributed operations */
+/* Chunk operation descriptor for distributed operations across core groups */
 typedef struct mem_shared_chunk_op {
-  unsigned int target_core;        /* Target core for this chunk */
-  unsigned int source_core;        /* Source core for this chunk */
+  unsigned int target_group;       /* Target core group for this chunk */
+  unsigned int source_group;       /* Source core group for this chunk */
+  unsigned int target_intra_id;    /* Target intra-group ID (0 or 1) */
+  unsigned int source_intra_id;    /* Source intra-group ID (0 or 1) */
   unsigned int target_offset;      /* Target offset within core */
   unsigned int source_offset;      /* Source offset within core */
   unsigned int chunk_size;         /* Size of this chunk */
-  void *src_ptr;                  /* Source pointer (for copy operations) */
-  void *dst_ptr;                  /* Destination pointer */
+  void *src_ptr;                   /* Source pointer (for copy operations) */
+  void *dst_ptr;                   /* Destination pointer */
   struct mem_shared_chunk_op *next; /* Next chunk operation */
 } mem_shared_chunk_op_t;
 
@@ -60,8 +62,8 @@ typedef struct {
   tree src_arg;                   /* Source argument (for copy ops) */
   mem_shared_chunk_op_t *chunk_ops; /* List of chunk operations */
   unsigned int num_chunks;        /* Number of chunk operations */
-  bool target_is_distributed;     /* Whether target is distributed */
-  bool source_is_distributed;     /* Whether source is distributed */
+  bool target_is_distributed;     /* Whether target is distributed across groups */
+  bool source_is_distributed;     /* Whether source is distributed across groups */
 } mem_shared_intrinsic_context_t;
 
 /* Function prototypes */
@@ -91,12 +93,12 @@ extern tree mem_shared_replace_intrinsic_call (tree call_expr);
 
 /* Optimization support */
 extern bool mem_shared_can_optimize_intrinsic (mem_shared_intrinsic_context_t *ctx);
-extern tree mem_shared_optimize_single_core_intrinsic (mem_shared_intrinsic_context_t *ctx);
+extern tree mem_shared_optimize_single_group_intrinsic (mem_shared_intrinsic_context_t *ctx);
 extern tree mem_shared_optimize_distributed_intrinsic (mem_shared_intrinsic_context_t *ctx);
 
 /* Helper functions for address calculation */
-extern tree mem_shared_build_chunk_address (tree base_addr, unsigned int core,
-                                           unsigned int offset);
+extern tree mem_shared_build_chunk_address (tree base_addr, unsigned int group_id,
+                                           unsigned int intra_id, unsigned int offset);
 extern tree mem_shared_build_chunk_size_expr (mem_shared_chunk_op_t *op);
 extern tree mem_shared_build_intrinsic_call (const char *func_name, 
                                             tree dst, tree src, tree size);
@@ -161,6 +163,19 @@ mem_shared_has_source_operand (mem_shared_intrinsic_type_t type)
           type == MEM_SHARED_INTRINSIC_STRNCMP ||
           type == MEM_SHARED_INTRINSIC_MEMCMP ||
           type == MEM_SHARED_INTRINSIC_STRLEN);
+}
+
+/* Address encoding helpers for dual-core groups */
+static inline unsigned int
+mem_shared_chunk_core_to_group (unsigned int chunk_core)
+{
+  return chunk_core / CORES_PER_GROUP;
+}
+
+static inline unsigned int
+mem_shared_chunk_core_to_intra_id (unsigned int chunk_core)
+{
+  return chunk_core % CORES_PER_GROUP;
 }
 
 #endif /* GCC_MEM_SHARED_INTRINSICS_H */

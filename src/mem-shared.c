@@ -1,4 +1,4 @@
-/* mem-shared.c - Implementation of mem_shared functionality
+/* mem-shared.c - Implementation of mem_shared memory management
    Copyright (C) 2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
@@ -23,236 +23,296 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree.h"
 #include "rtl.h"
 #include "expr.h"
+#include "stor-layout.h"
 #include "tree-iterator.h"
+#include "gimplify.h"
 #include "diagnostic.h"
 #include "fold-const.h"
-#include "stor-layout.h"
+#include "langhooks.h"
 #include "mem-shared.h"
 
-/* Global state */
-unsigned int mem_shared_num_cores = 1;
-core_memory_t core_memories[MAX_CORES];
-mem_shared_info_t *mem_shared_allocations = NULL;
+/* Global state for mem_shared memory management */
+unsigned int mem_shared_num_groups = MAX_CORE_GROUPS;  /* Default: all 54 groups */
+unsigned int mem_shared_total_cores = MAX_TOTAL_CORES; /* Default: 108 cores */
+unsigned int mem_shared_core_memory_size = DEFAULT_CORE_MEMORY_SIZE; /* Default: 2KB per core */
 
-/* Static variables */
-static bool mem_shared_initialized = false;
-static unsigned int next_core_allocation = 0;
+/* Core group tracking */
+core_group_info_t mem_shared_group_info[MAX_CORE_GROUPS];
+mem_shared_info_t *mem_shared_allocation_list = NULL;
+
+/* Round-robin allocation state */
+static unsigned int next_group_allocation = 0;
 
 /* Initialize mem_shared subsystem */
 void
-mem_shared_init (unsigned int num_cores)
+mem_shared_init (unsigned int num_groups, unsigned int core_size)
 {
-  unsigned int i;
+  unsigned int i, j;
   
-  if (mem_shared_initialized)
-    return;
-    
-  if (num_cores == 0 || num_cores > MAX_CORES)
+  /* Validate and set parameters */
+  if (num_groups > MAX_CORE_GROUPS)
     {
-      error ("invalid number of cores for mem_shared: %u", num_cores);
-      return;
+      warning (0, "mem_shared: requested %u groups exceeds maximum %u, using %u",
+              num_groups, MAX_CORE_GROUPS, MAX_CORE_GROUPS);
+      num_groups = MAX_CORE_GROUPS;
     }
     
-  mem_shared_num_cores = num_cores;
-  
-  /* Initialize core memory tracking */
-  for (i = 0; i < num_cores; i++)
+  if (core_size > MAX_CORE_MEMORY_SIZE)
     {
-      core_memories[i].used_size = 0;
-      core_memories[i].available_size = CORE_MEMORY_SIZE;
-      core_memories[i].num_allocations = 0;
-      memset (core_memories[i].allocations, 0, sizeof (core_memories[i].allocations));
+      warning (0, "mem_shared: requested core size %u exceeds maximum %u, using %u",
+              core_size, MAX_CORE_MEMORY_SIZE, MAX_CORE_MEMORY_SIZE);
+      core_size = MAX_CORE_MEMORY_SIZE;
     }
     
-  mem_shared_initialized = true;
+  mem_shared_num_groups = num_groups;
+  mem_shared_total_cores = num_groups * CORES_PER_GROUP;
+  mem_shared_core_memory_size = core_size;
+  
+  /* Initialize group information */
+  for (i = 0; i < MAX_CORE_GROUPS; i++)
+    {
+      for (j = 0; j < CORES_PER_GROUP; j++)
+        {
+          mem_shared_group_info[i].used_memory[j] = 0;
+          mem_shared_group_info[i].free_memory[j] = 
+            (i < mem_shared_num_groups) ? mem_shared_core_memory_size : 0;
+        }
+      mem_shared_group_info[i].allocated_vars = 0;
+    }
+    
+  /* Reset allocation state */
+  mem_shared_allocation_list = NULL;
+  next_group_allocation = 0;
   
   if (flag_dump_mem_shared)
-    fprintf (stderr, "[mem_shared] Initialized with %u cores\n", num_cores);
+    fprintf (stderr, "[mem_shared] Initialized: %u groups (%u cores), %u bytes per core\n",
+            mem_shared_num_groups, mem_shared_total_cores, mem_shared_core_memory_size);
 }
 
 /* Cleanup mem_shared subsystem */
 void
 mem_shared_cleanup (void)
 {
-  mem_shared_info_t *info, *next;
+  mem_shared_info_t *current, *next;
   
-  if (!mem_shared_initialized)
-    return;
-    
-  /* Free all allocation records */
-  for (info = mem_shared_allocations; info; info = next)
+  /* Free allocation list */
+  for (current = mem_shared_allocation_list; current; current = next)
     {
-      next = info->next;
-      free (info);
+      next = current->next;
+      free (current);
     }
     
-  mem_shared_allocations = NULL;
-  mem_shared_initialized = false;
+  mem_shared_allocation_list = NULL;
+  
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Cleanup completed\n");
 }
 
 /* Check if a type is a basic type */
 bool
 mem_shared_is_basic_type (tree type)
 {
-  enum tree_code code = TREE_CODE (type);
-  
-  return (code == INTEGER_TYPE || code == REAL_TYPE || 
-          code == FIXED_POINT_TYPE || code == BOOLEAN_TYPE ||
-          code == ENUMERAL_TYPE || code == POINTER_TYPE);
+  if (!type)
+    return false;
+    
+  switch (TREE_CODE (type))
+    {
+    case INTEGER_TYPE:
+    case REAL_TYPE:
+    case ENUMERAL_TYPE:
+    case BOOLEAN_TYPE:
+    case POINTER_TYPE:
+      return true;
+    default:
+      return false;
+    }
 }
 
-/* Get data size for a declaration */
+/* Calculate data size for a declaration */
 unsigned int
 mem_shared_get_data_size (tree decl)
 {
-  tree type = TREE_TYPE (decl);
+  tree type, size_tree;
+  HOST_WIDE_INT size;
   
-  if (!tree_fits_uhwi_p (TYPE_SIZE_UNIT (type)))
-    {
-      error ("mem_shared variable %qD has unknown size", decl);
-      return 0;
-    }
+  if (!decl || TREE_CODE (decl) != VAR_DECL)
+    return 0;
     
-  return tree_to_uhwi (TYPE_SIZE_UNIT (type));
+  type = TREE_TYPE (decl);
+  size_tree = TYPE_SIZE_UNIT (type);
+  
+  if (!size_tree || !tree_fits_uhwi_p (size_tree))
+    return 0;
+    
+  size = tree_to_uhwi (size_tree);
+  return (unsigned int) size;
 }
 
-/* Find best core for allocation */
+/* Find the best group for allocation using best-fit algorithm */
 unsigned int
-mem_shared_get_best_core (unsigned int size)
+mem_shared_get_best_group (unsigned int size)
 {
-  unsigned int best_core = 0;
-  unsigned int min_used = CORE_MEMORY_SIZE;
-  unsigned int i;
+  unsigned int best_group = 0;
+  unsigned int best_fit_size = UINT_MAX;
+  unsigned int i, j;
   
-  /* Find core with most available space */
-  for (i = 0; i < mem_shared_num_cores; i++)
+  for (i = 0; i < mem_shared_num_groups; i++)
     {
-      if (core_memories[i].available_size >= size && 
-          core_memories[i].used_size < min_used)
+      for (j = 0; j < CORES_PER_GROUP; j++)
         {
-          min_used = core_memories[i].used_size;
-          best_core = i;
+          if (mem_shared_group_info[i].free_memory[j] >= size &&
+              mem_shared_group_info[i].free_memory[j] < best_fit_size)
+            {
+              best_group = i;
+              best_fit_size = mem_shared_group_info[i].free_memory[j];
+            }
         }
     }
     
-  if (core_memories[best_core].available_size < size)
+  return best_group;
+}
+
+/* Get next group using round-robin allocation */
+unsigned int
+mem_shared_get_next_group (void)
+{
+  unsigned int group = next_group_allocation;
+  next_group_allocation = (next_group_allocation + 1) % mem_shared_num_groups;
+  return group;
+}
+
+/* Find the best core within a group for allocation */
+unsigned int
+mem_shared_get_best_core_in_group (unsigned int group_id, unsigned int size)
+{
+  unsigned int best_core = 0;
+  unsigned int best_free = 0;
+  unsigned int i;
+  
+  if (group_id >= mem_shared_num_groups)
+    return 0;
+    
+  for (i = 0; i < CORES_PER_GROUP; i++)
     {
-      error ("no core has enough space for allocation of %u bytes", size);
-      return 0;
+      if (mem_shared_group_info[group_id].free_memory[i] >= size &&
+          mem_shared_group_info[group_id].free_memory[i] > best_free)
+        {
+          best_core = i;
+          best_free = mem_shared_group_info[group_id].free_memory[i];
+        }
     }
     
   return best_core;
 }
 
-/* Get next core for round-robin allocation */
-unsigned int
-mem_shared_get_next_core (void)
-{
-  unsigned int core = next_core_allocation;
-  next_core_allocation = (next_core_allocation + 1) % mem_shared_num_cores;
-  return core;
-}
-
-/* Distribute large data across cores */
+/* Distribute large data across multiple groups */
 void
 mem_shared_distribute_data (mem_shared_info_t *info, unsigned int total_size)
 {
-  unsigned int chunk_size = total_size / mem_shared_num_cores;
-  unsigned int remainder = total_size % mem_shared_num_cores;
-  unsigned int i;
+  unsigned int chunk_size, i;
   
-  info->num_chunks = mem_shared_num_cores;
+  /* Calculate chunk size (distribute evenly across all groups) */
+  chunk_size = (total_size + mem_shared_num_groups - 1) / mem_shared_num_groups;
+  
+  info->is_distributed = true;
+  info->num_chunks = mem_shared_num_groups;
   info->chunk_size = chunk_size;
+  info->target_group = 0;  /* Start from group 0 */
+  info->intra_group_id = 0; /* Use first core in each group by default */
   
-  /* Allocate space on each core */
-  for (i = 0; i < mem_shared_num_cores; i++)
+  /* Update memory usage for all participating groups */
+  for (i = 0; i < mem_shared_num_groups; i++)
     {
-      unsigned int this_chunk_size = chunk_size;
-      if (i < remainder)
-        this_chunk_size++;
+      unsigned int actual_chunk_size = chunk_size;
+      
+      /* Adjust last chunk size */
+      if (i == mem_shared_num_groups - 1)
+        actual_chunk_size = total_size - (chunk_size * (mem_shared_num_groups - 1));
         
-      if (core_memories[i].available_size < this_chunk_size)
+      if (mem_shared_group_info[i].free_memory[0] >= actual_chunk_size)
         {
-          error ("core %u has insufficient space for distributed allocation", i);
-          return;
+          mem_shared_group_info[i].used_memory[0] += actual_chunk_size;
+          mem_shared_group_info[i].free_memory[0] -= actual_chunk_size;
         }
-        
-      core_memories[i].used_size += this_chunk_size;
-      core_memories[i].available_size -= this_chunk_size;
     }
+    
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Distributed %u bytes across %u groups, %u bytes per chunk\n",
+            total_size, mem_shared_num_groups, chunk_size);
 }
 
-/* Allocate memory for mem_shared variable */
+/* Allocate memory for a mem_shared variable */
 mem_shared_info_t *
 mem_shared_allocate (tree decl)
 {
   mem_shared_info_t *info;
-  unsigned int data_size;
-  unsigned int aligned_size;
+  tree type;
+  unsigned int size, group_id, intra_id, start_offset;
   
-  if (!mem_shared_initialized)
-    {
-      error ("mem_shared not initialized");
-      return NULL;
-    }
-    
-  data_size = mem_shared_get_data_size (decl);
-  if (data_size == 0)
+  if (!decl || TREE_CODE (decl) != VAR_DECL)
     return NULL;
     
-  aligned_size = mem_shared_align_size (data_size);
-  
-  /* Create allocation record */
+  /* Check if already allocated */
+  info = mem_shared_get_info (decl);
+  if (info)
+    return info;
+    
+  /* Calculate size and determine category */
+  size = mem_shared_get_data_size (decl);
+  if (size == 0)
+    return NULL;
+    
+  /* Create allocation info */
   info = XNEW (mem_shared_info_t);
   info->decl = decl;
-  info->size = aligned_size;
+  info->size = size;
   info->is_distributed = false;
   info->num_chunks = 1;
-  info->chunk_size = aligned_size;
-  info->next = mem_shared_allocations;
-  mem_shared_allocations = info;
+  info->chunk_size = size;
+  info->next = mem_shared_allocation_list;
+  mem_shared_allocation_list = info;
+  
+  type = TREE_TYPE (decl);
   
   /* Determine allocation strategy */
-  if (mem_shared_is_basic_type (TREE_TYPE (decl)))
+  if (mem_shared_is_basic_type (type))
     {
+      /* Basic types: round-robin allocation */
       info->category = MEM_SHARED_BASIC_TYPE;
-      info->target_core = mem_shared_get_next_core ();
+      group_id = mem_shared_get_next_group ();
+      intra_id = mem_shared_get_best_core_in_group (group_id, size);
     }
-  else if (aligned_size < DISTRIBUTION_THRESHOLD)
+  else if (size < DISTRIBUTION_THRESHOLD)
     {
+      /* Small data: best-fit allocation */
       info->category = MEM_SHARED_SMALL_DATA;
-      info->target_core = mem_shared_get_best_core (aligned_size);
+      group_id = mem_shared_get_best_group (size);
+      intra_id = mem_shared_get_best_core_in_group (group_id, size);
     }
   else
     {
+      /* Large data: distribute across groups */
       info->category = MEM_SHARED_LARGE_DATA;
-      info->target_core = 0; /* Start from core 0 */
-      info->is_distributed = true;
-      mem_shared_distribute_data (info, aligned_size);
-      
-      if (flag_dump_mem_shared)
-        fprintf (stderr, "[mem_shared] %s: distributed %u bytes across %u cores\n",
-                IDENTIFIER_POINTER (DECL_NAME (decl)), aligned_size, 
-                mem_shared_num_cores);
+      mem_shared_distribute_data (info, size);
       return info;
     }
     
-  /* Single core allocation */
-  if (core_memories[info->target_core].available_size < aligned_size)
-    {
-      error ("core %u has insufficient space for %qD (%u bytes)",
-             info->target_core, decl, aligned_size);
-      return NULL;
-    }
-    
-  info->start_offset = core_memories[info->target_core].used_size;
-  core_memories[info->target_core].used_size += aligned_size;
-  core_memories[info->target_core].available_size -= aligned_size;
+  /* Single group allocation */
+  info->target_group = group_id;
+  info->intra_group_id = intra_id;
+  
+  /* Calculate start offset within core memory */
+  start_offset = mem_shared_group_info[group_id].used_memory[intra_id];
+  info->start_offset = start_offset;
+  
+  /* Update memory usage */
+  mem_shared_group_info[group_id].used_memory[intra_id] += size;
+  mem_shared_group_info[group_id].free_memory[intra_id] -= size;
+  mem_shared_group_info[group_id].allocated_vars++;
   
   if (flag_dump_mem_shared)
-    fprintf (stderr, "[mem_shared] %s: allocated %u bytes on core %u at offset 0x%x\n",
-            IDENTIFIER_POINTER (DECL_NAME (decl)), aligned_size, 
-            info->target_core, info->start_offset);
+    fprintf (stderr, "[mem_shared] Allocated %u bytes for '%s' in group %u core %u at offset 0x%x\n",
+            size, IDENTIFIER_POINTER (DECL_NAME (decl)), group_id, intra_id, start_offset);
             
   return info;
 }
@@ -263,7 +323,10 @@ mem_shared_get_info (tree decl)
 {
   mem_shared_info_t *info;
   
-  for (info = mem_shared_allocations; info; info = info->next)
+  if (!decl)
+    return NULL;
+    
+  for (info = mem_shared_allocation_list; info; info = info->next)
     {
       if (info->decl == decl)
         return info;
@@ -272,57 +335,97 @@ mem_shared_get_info (tree decl)
   return NULL;
 }
 
-/* Calculate target core for distributed data access */
+/* Calculate target group for distributed data access */
 unsigned int
-mem_shared_calculate_target_core (tree decl, HOST_WIDE_INT offset)
+mem_shared_calculate_target_group (tree decl, HOST_WIDE_INT offset)
 {
-  mem_shared_info_t *info = mem_shared_get_info (decl);
+  mem_shared_info_t *info;
+  unsigned int chunk_index;
   
-  if (!info || !info->is_distributed)
-    return info ? info->target_core : 0;
+  info = mem_shared_get_info (decl);
+  if (!info)
+    return 0;
     
-  /* Calculate which core contains this offset */
-  unsigned int chunk_index = offset / info->chunk_size;
-  return (info->target_core + chunk_index) % mem_shared_num_cores;
+  if (!info->is_distributed)
+    return info->target_group;
+    
+  /* Calculate which chunk this offset falls into */
+  chunk_index = offset / info->chunk_size;
+  return (info->target_group + chunk_index) % mem_shared_num_groups;
+}
+
+/* Calculate intra-group ID for access */
+unsigned int
+mem_shared_calculate_intra_group_id (tree decl, HOST_WIDE_INT offset)
+{
+  mem_shared_info_t *info;
+  
+  info = mem_shared_get_info (decl);
+  if (!info)
+    return 0;
+    
+  /* For distributed data, use core 0 in each group by default */
+  /* For single allocation, use the allocated core */
+  return info->intra_group_id;
 }
 
 /* Calculate local offset within target core */
 unsigned int
 mem_shared_calculate_local_offset (tree decl, HOST_WIDE_INT offset)
 {
-  mem_shared_info_t *info = mem_shared_get_info (decl);
+  mem_shared_info_t *info;
+  unsigned int local_offset;
   
-  if (!info || !info->is_distributed)
-    return info ? (info->start_offset + offset) : offset;
+  info = mem_shared_get_info (decl);
+  if (!info)
+    return 0;
     
-  /* Calculate offset within the target core */
-  unsigned int local_offset = offset % info->chunk_size;
+  if (!info->is_distributed)
+    return info->start_offset + offset;
+    
+  /* For distributed data, calculate offset within chunk */
+  local_offset = info->start_offset + (offset % info->chunk_size);
   return local_offset;
 }
 
-/* Generate address for mem_shared variable */
+/* Encode cross-core access address */
+rtx
+mem_shared_encode_cross_core_address (unsigned int group_id, unsigned int intra_id,
+                                     unsigned int local_offset)
+{
+  HOST_WIDE_INT encoded_addr = local_offset;
+  
+  /* Set cross-core access bit (bit 29) */
+  encoded_addr = mem_shared_set_cross_core_bit (encoded_addr);
+  
+  /* Clear reserved bit (bit 27) */
+  encoded_addr = mem_shared_clear_reserved_bit (encoded_addr);
+  
+  /* Set group ID in bits 26:21 */
+  encoded_addr = mem_shared_set_group_bits (encoded_addr, group_id);
+  
+  /* Set intra-group ID in bit 20 */
+  encoded_addr = mem_shared_set_intra_id_bit (encoded_addr, intra_id);
+  
+  return gen_int_mode (encoded_addr, Pmode);
+}
+
+/* Generate address for mem_shared variable access */
 rtx
 mem_shared_generate_address (tree decl, HOST_WIDE_INT offset)
 {
-  unsigned int target_core;
-  unsigned int local_offset;
-  rtx core_id, base_addr, addr;
+  unsigned int target_group, intra_id, local_offset;
   
-  target_core = mem_shared_calculate_target_core (decl, offset);
+  /* Calculate address components */
+  target_group = mem_shared_calculate_target_group (decl, offset);
+  intra_id = mem_shared_calculate_intra_group_id (decl, offset);
   local_offset = mem_shared_calculate_local_offset (decl, offset);
   
-  /* Create RTL for (core_id << 21) | local_offset */
-  core_id = GEN_INT (target_core);
-  base_addr = GEN_INT (local_offset);
-  
-  addr = gen_rtx_IOR (Pmode,
-                     gen_rtx_ASHIFT (Pmode, core_id, GEN_INT (21)),
-                     base_addr);
-                     
-  return addr;
+  /* For now, assume all accesses are cross-core (can be optimized later) */
+  return mem_shared_encode_cross_core_address (target_group, intra_id, local_offset);
 }
 
-/* Expand load from mem_shared variable */
+/* Expand load operation for mem_shared variable */
 rtx
 mem_shared_expand_load (tree decl, HOST_WIDE_INT offset, machine_mode mode)
 {
@@ -331,53 +434,81 @@ mem_shared_expand_load (tree decl, HOST_WIDE_INT offset, machine_mode mode)
   addr = mem_shared_generate_address (decl, offset);
   mem = gen_rtx_MEM (mode, addr);
   
-  /* Set memory attributes */
-  set_mem_alias_set (mem, 0); /* May alias anything */
-  MEM_VOLATILE_P (mem) = 1;   /* Prevent unwanted optimizations */
+  /* Mark as mem_shared access for optimization */
+  MEM_VOLATILE_P (mem) = 0; /* Allow optimization */
   
+  if (flag_dump_mem_shared)
+    {
+      mem_shared_info_t *info = mem_shared_get_info (decl);
+      if (info)
+        fprintf (stderr, "[mem_shared] Load from '%s' group %u intra %u offset 0x%x\n",
+                IDENTIFIER_POINTER (DECL_NAME (decl)),
+                mem_shared_calculate_target_group (decl, offset),
+                mem_shared_calculate_intra_group_id (decl, offset),
+                mem_shared_calculate_local_offset (decl, offset));
+    }
+    
   return mem;
 }
 
-/* Expand store to mem_shared variable */
+/* Expand store operation for mem_shared variable */
 void
 mem_shared_expand_store (tree decl, rtx value, HOST_WIDE_INT offset)
 {
-  machine_mode mode = TYPE_MODE (TREE_TYPE (decl));
   rtx addr, mem;
   
   addr = mem_shared_generate_address (decl, offset);
-  mem = gen_rtx_MEM (mode, addr);
+  mem = gen_rtx_MEM (GET_MODE (value), addr);
   
-  set_mem_alias_set (mem, 0);
-  MEM_VOLATILE_P (mem) = 1;
+  /* Mark as mem_shared access */
+  MEM_VOLATILE_P (mem) = 0; /* Allow optimization */
   
+  /* Emit store instruction */
   emit_move_insn (mem, value);
+  
+  if (flag_dump_mem_shared)
+    {
+      mem_shared_info_t *info = mem_shared_get_info (decl);
+      if (info)
+        fprintf (stderr, "[mem_shared] Store to '%s' group %u intra %u offset 0x%x\n",
+                IDENTIFIER_POINTER (DECL_NAME (decl)),
+                mem_shared_calculate_target_group (decl, offset),
+                mem_shared_calculate_intra_group_id (decl, offset),
+                mem_shared_calculate_local_offset (decl, offset));
+    }
 }
 
-/* Process mem_shared declaration */
+/* Process a mem_shared declaration */
 void
 mem_shared_process_declaration (tree decl)
 {
   mem_shared_info_t *info;
   
-  if (!DECL_MEM_SHARED_P (decl))
+  if (!decl || TREE_CODE (decl) != VAR_DECL)
     return;
     
-  if (TREE_CODE (decl) != VAR_DECL)
-    {
-      error ("mem_shared can only be applied to variables");
-      return;
-    }
+  if (!mem_shared_decl_p (decl))
+    return;
     
-  if (!mem_shared_initialized)
-    mem_shared_init (mem_shared_num_cores);
-    
+  /* Allocate memory for this declaration */
   info = mem_shared_allocate (decl);
   if (!info)
     {
-      error ("failed to allocate mem_shared storage for %qD", decl);
+      error ("failed to allocate mem_shared memory for %qD", decl);
       return;
     }
+    
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Processed declaration '%s'\n",
+            IDENTIFIER_POINTER (DECL_NAME (decl)));
+}
+
+/* Check if declaration is mem_shared */
+bool
+mem_shared_decl_p (tree decl)
+{
+  return (TREE_CODE (decl) == VAR_DECL && 
+          lookup_attribute ("mem_shared", DECL_ATTRIBUTES (decl)) != NULL);
 }
 
 /* Dump allocation information */
@@ -385,66 +516,58 @@ void
 mem_shared_dump_allocation_info (FILE *file)
 {
   mem_shared_info_t *info;
+  const char *category_names[] = {"BASIC", "SMALL", "LARGE"};
   
   fprintf (file, "\n=== mem_shared Allocation Information ===\n");
-  fprintf (file, "Number of cores: %u\n", mem_shared_num_cores);
-  fprintf (file, "Core memory size: %u bytes\n", CORE_MEMORY_SIZE);
-  fprintf (file, "Distribution threshold: %u bytes\n", DISTRIBUTION_THRESHOLD);
-  
-  for (info = mem_shared_allocations; info; info = info->next)
+  fprintf (file, "Configuration: %u groups, %u total cores, %u bytes per core\n",
+          mem_shared_num_groups, mem_shared_total_cores, mem_shared_core_memory_size);
+          
+  fprintf (file, "\nAllocated Variables:\n");
+  for (info = mem_shared_allocation_list; info; info = info->next)
     {
-      const char *name = IDENTIFIER_POINTER (DECL_NAME (info->decl));
-      const char *category_name;
-      
-      switch (info->category)
-        {
-        case MEM_SHARED_BASIC_TYPE:
-          category_name = "basic type";
-          break;
-        case MEM_SHARED_SMALL_DATA:
-          category_name = "small data";
-          break;
-        case MEM_SHARED_LARGE_DATA:
-          category_name = "large data";
-          break;
-        default:
-          category_name = "unknown";
-          break;
-        }
-        
-      fprintf (file, "Variable: %s\n", name);
-      fprintf (file, "  Category: %s\n", category_name);
-      fprintf (file, "  Size: %u bytes\n", info->size);
-      fprintf (file, "  Target core: %u\n", info->target_core);
-      fprintf (file, "  Start offset: 0x%x\n", info->start_offset);
-      fprintf (file, "  Distributed: %s\n", info->is_distributed ? "yes" : "no");
+      fprintf (file, "  %-20s: %6u bytes, %s, group %u intra %u",
+              IDENTIFIER_POINTER (DECL_NAME (info->decl)),
+              info->size,
+              category_names[info->category],
+              info->target_group,
+              info->intra_group_id);
+              
       if (info->is_distributed)
-        {
-          fprintf (file, "  Chunks: %u\n", info->num_chunks);
-          fprintf (file, "  Chunk size: %u bytes\n", info->chunk_size);
-        }
+        fprintf (file, " (distributed, %u chunks)", info->num_chunks);
+        
       fprintf (file, "\n");
     }
 }
 
-/* Dump core usage statistics */
+/* Dump group usage information */
 void
-mem_shared_dump_core_usage (FILE *file)
+mem_shared_dump_group_usage (FILE *file)
 {
-  unsigned int i;
+  unsigned int i, j;
+  unsigned int total_used = 0, total_available = 0;
   
-  fprintf (file, "\n=== Core Memory Usage ===\n");
+  fprintf (file, "\n=== mem_shared Group Usage ===\n");
+  fprintf (file, "Group  Core0-Used  Core0-Free  Core1-Used  Core1-Free  Variables\n");
   
-  for (i = 0; i < mem_shared_num_cores; i++)
+  for (i = 0; i < mem_shared_num_groups; i++)
     {
-      fprintf (file, "Core %u:\n", i);
-      fprintf (file, "  Used: %u bytes (%.1f%%)\n", 
-              core_memories[i].used_size,
-              (float)core_memories[i].used_size * 100.0f / CORE_MEMORY_SIZE);
-      fprintf (file, "  Available: %u bytes (%.1f%%)\n",
-              core_memories[i].available_size,
-              (float)core_memories[i].available_size * 100.0f / CORE_MEMORY_SIZE);
-      fprintf (file, "  Allocations: %u\n", core_memories[i].num_allocations);
-      fprintf (file, "\n");
+      fprintf (file, "%5u  %10u  %10u  %10u  %10u  %9u\n",
+              i,
+              mem_shared_group_info[i].used_memory[0],
+              mem_shared_group_info[i].free_memory[0],
+              mem_shared_group_info[i].used_memory[1],
+              mem_shared_group_info[i].free_memory[1],
+              mem_shared_group_info[i].allocated_vars);
+              
+      for (j = 0; j < CORES_PER_GROUP; j++)
+        {
+          total_used += mem_shared_group_info[i].used_memory[j];
+          total_available += mem_shared_group_info[i].free_memory[j];
+        }
     }
+    
+  fprintf (file, "\nTotal: %u bytes used, %u bytes available\n",
+          total_used, total_available);
+  fprintf (file, "Usage: %.1f%% of total capacity\n",
+          (double)total_used / (total_used + total_available) * 100.0);
 }

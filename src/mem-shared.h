@@ -1,4 +1,4 @@
-/* mem-shared.h - Memory management for mem_shared variables
+/* mem-shared.h - Header file for mem_shared memory management subsystem
    Copyright (C) 2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
@@ -25,138 +25,161 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree.h"
 #include "rtl.h"
 
-/* Maximum number of cores supported */
-#define MAX_CORES 256
+/* Maximum number of core groups supported (54 groups) */
+#define MAX_CORE_GROUPS 54
 
-/* Maximum allocations per core */
-#define MAX_ALLOCATIONS 1024
+/* Cores per group (always 2) */
+#define CORES_PER_GROUP 2
 
-/* Core memory size (512KB) */
-#define CORE_MEMORY_SIZE 524288
+/* Maximum total cores (54 groups * 2 cores) */
+#define MAX_TOTAL_CORES (MAX_CORE_GROUPS * CORES_PER_GROUP)
+
+/* Default core memory size (2KB) */
+#define DEFAULT_CORE_MEMORY_SIZE 2048
+
+/* Maximum core memory size (20KB) */
+#define MAX_CORE_MEMORY_SIZE 20480
 
 /* Data size threshold for distribution (10KB) */
 #define DISTRIBUTION_THRESHOLD 10240
 
-/* mem_shared data classification */
+/* Address encoding bit positions */
+#define CROSS_CORE_ACCESS_BIT 29     /* addr[29] = 1 for cross-core access */
+#define CORE_GROUP_START_BIT 21      /* addr[26:21] = core group number */
+#define CORE_GROUP_END_BIT 26
+#define INTRA_GROUP_ID_BIT 20        /* addr[20] = intra-group ID (0 or 1) */
+#define RESERVED_BIT 27              /* addr[27] = 0 (reserved) */
+
+/* Memory allocation categories */
 typedef enum {
-  MEM_SHARED_BASIC_TYPE,    /* Basic data types */
-  MEM_SHARED_SMALL_DATA,    /* Data < 10KB */
-  MEM_SHARED_LARGE_DATA     /* Data >= 10KB */
+  MEM_SHARED_BASIC_TYPE,    /* Basic data types (int, float, double) */
+  MEM_SHARED_SMALL_DATA,    /* Data < DISTRIBUTION_THRESHOLD */
+  MEM_SHARED_LARGE_DATA     /* Data >= DISTRIBUTION_THRESHOLD */
 } mem_shared_category_t;
 
-/* Memory allocation information for mem_shared variables */
+/* Memory allocation information for each mem_shared variable */
 typedef struct mem_shared_info {
-  tree decl;                        /* Declaration node */
-  mem_shared_category_t category;   /* Data category */
-  unsigned int target_core;         /* Target core number */
-  unsigned int start_offset;        /* Starting offset in core memory */
-  unsigned int size;               /* Total size in bytes */
-  bool is_distributed;             /* Whether data is distributed */
-  unsigned int num_chunks;         /* Number of distribution chunks */
-  unsigned int chunk_size;         /* Size of each chunk */
-  struct mem_shared_info *next;    /* Next allocation in list */
+  tree decl;                      /* Variable declaration */
+  mem_shared_category_t category; /* Allocation category */
+  unsigned int target_group;      /* Target core group (0-53) */
+  unsigned int intra_group_id;    /* Intra-group ID (0 or 1) */
+  unsigned int start_offset;      /* Start offset within core memory */
+  unsigned int size;              /* Total size of the variable */
+  bool is_distributed;            /* Whether data is distributed across groups */
+  unsigned int num_chunks;        /* Number of chunks (for distributed data) */
+  unsigned int chunk_size;        /* Size of each chunk */
+  struct mem_shared_info *next;   /* Next in linked list */
 } mem_shared_info_t;
 
-/* Per-core memory tracking */
+/* Core group memory usage tracking */
 typedef struct {
-  unsigned int used_size;          /* Used memory in bytes */
-  unsigned int available_size;     /* Available memory in bytes */
-  mem_shared_info_t *allocations[MAX_ALLOCATIONS];
-  unsigned int num_allocations;    /* Number of allocations */
-} core_memory_t;
+  unsigned int used_memory[CORES_PER_GROUP]; /* Memory used by each core in group */
+  unsigned int free_memory[CORES_PER_GROUP]; /* Free memory in each core */
+  unsigned int allocated_vars;               /* Number of allocated variables in group */
+} core_group_info_t;
 
-/* Global memory management state */
-extern unsigned int mem_shared_num_cores;
-extern core_memory_t core_memories[MAX_CORES];
-extern mem_shared_info_t *mem_shared_allocations;
+/* Global configuration */
+extern unsigned int mem_shared_num_groups;      /* Number of participating groups */
+extern unsigned int mem_shared_total_cores;     /* Total participating cores */
+extern unsigned int mem_shared_core_memory_size; /* Memory size per core */
+extern bool flag_mem_shared;                    /* Enable mem_shared support */
+extern bool flag_dump_mem_shared;               /* Enable debug output */
+
+/* Core group tracking */
+extern core_group_info_t mem_shared_group_info[MAX_CORE_GROUPS];
+extern mem_shared_info_t *mem_shared_allocation_list;
 
 /* Function prototypes */
 
 /* Initialization and cleanup */
-extern void mem_shared_init (unsigned int num_cores);
+extern void mem_shared_init (unsigned int num_groups, unsigned int core_size);
 extern void mem_shared_cleanup (void);
 
-/* Memory allocation */
-extern mem_shared_info_t *mem_shared_allocate (tree decl);
-extern bool mem_shared_deallocate (tree decl);
-
-/* Core management */
-extern unsigned int mem_shared_get_best_core (unsigned int size);
-extern unsigned int mem_shared_get_next_core (void);
-extern bool mem_shared_allocate_on_core (unsigned int core, unsigned int size);
-
-/* Distribution management */
-extern void mem_shared_distribute_data (mem_shared_info_t *info, unsigned int total_size);
-extern unsigned int mem_shared_calculate_target_core (tree decl, HOST_WIDE_INT offset);
-extern unsigned int mem_shared_calculate_local_offset (tree decl, HOST_WIDE_INT offset);
-
-/* Query functions */
-extern mem_shared_info_t *mem_shared_get_info (tree decl);
+/* Memory allocation and management */
 extern bool mem_shared_is_basic_type (tree type);
-extern bool mem_shared_is_distributed (tree decl);
 extern unsigned int mem_shared_get_data_size (tree decl);
+extern unsigned int mem_shared_get_best_group (unsigned int size);
+extern unsigned int mem_shared_get_next_group (void);
+extern unsigned int mem_shared_get_best_core_in_group (unsigned int group_id, unsigned int size);
+extern void mem_shared_distribute_data (mem_shared_info_t *info, unsigned int total_size);
+extern mem_shared_info_t *mem_shared_allocate (tree decl);
+extern mem_shared_info_t *mem_shared_get_info (tree decl);
 
-/* Address generation */
+/* Address calculation and encoding */
+extern unsigned int mem_shared_calculate_target_group (tree decl, HOST_WIDE_INT offset);
+extern unsigned int mem_shared_calculate_intra_group_id (tree decl, HOST_WIDE_INT offset);
+extern unsigned int mem_shared_calculate_local_offset (tree decl, HOST_WIDE_INT offset);
 extern rtx mem_shared_generate_address (tree decl, HOST_WIDE_INT offset);
+extern rtx mem_shared_encode_cross_core_address (unsigned int group_id, 
+                                                unsigned int intra_id,
+                                                unsigned int local_offset);
+
+/* RTL expansion */
 extern rtx mem_shared_expand_load (tree decl, HOST_WIDE_INT offset, machine_mode mode);
 extern void mem_shared_expand_store (tree decl, rtx value, HOST_WIDE_INT offset);
 
-/* Debugging and diagnostics */
-extern void mem_shared_dump_allocation_info (FILE *file);
-extern void mem_shared_dump_core_usage (FILE *file);
-extern void mem_shared_check_conflicts (void);
-
-/* Compiler hooks */
+/* Declaration processing */
 extern void mem_shared_process_declaration (tree decl);
-extern void mem_shared_finalize_allocations (void);
 
-/* Target-specific hooks */
-extern bool mem_shared_target_supports_multicore (void);
-extern unsigned int mem_shared_target_get_core_count (void);
-extern rtx mem_shared_target_encode_address (unsigned int core, unsigned int offset);
+/* Utility functions */
+extern bool mem_shared_decl_p (tree decl);
+extern void mem_shared_dump_allocation_info (FILE *file);
+extern void mem_shared_dump_group_usage (FILE *file);
 
-/* Optimization support */
-extern bool mem_shared_can_optimize_access (tree decl);
-extern tree mem_shared_fold_address_expression (tree expr);
-
-/* Error handling */
-extern void mem_shared_error_core_overflow (unsigned int core, 
-                                          unsigned int used, 
-                                          unsigned int available);
-extern void mem_shared_error_invalid_declaration (tree decl, const char *reason);
-
-/* Inline helper functions */
-
+/* Address encoding helper functions */
 static inline bool
-mem_shared_decl_p (tree decl)
+mem_shared_needs_cross_core_access (unsigned int source_group, unsigned int source_id,
+                                   unsigned int target_group, unsigned int target_id)
 {
-  return (TREE_CODE (decl) == VAR_DECL && DECL_MEM_SHARED_P (decl));
+  return (source_group != target_group || source_id != target_id);
 }
 
 static inline unsigned int
-mem_shared_align_size (unsigned int size)
+mem_shared_core_to_group (unsigned int core_id)
 {
-  /* Align to 4-byte boundary */
-  return (size + 3) & ~3;
-}
-
-static inline bool
-mem_shared_core_has_space (unsigned int core, unsigned int size)
-{
-  return (core < mem_shared_num_cores && 
-          core_memories[core].available_size >= size);
+  return core_id / CORES_PER_GROUP;
 }
 
 static inline unsigned int
-mem_shared_get_core_used_size (unsigned int core)
+mem_shared_core_to_intra_id (unsigned int core_id)
 {
-  return (core < mem_shared_num_cores) ? core_memories[core].used_size : 0;
+  return core_id % CORES_PER_GROUP;
 }
 
 static inline unsigned int
-mem_shared_get_core_available_size (unsigned int core)
+mem_shared_group_and_id_to_core (unsigned int group_id, unsigned int intra_id)
 {
-  return (core < mem_shared_num_cores) ? core_memories[core].available_size : 0;
+  return group_id * CORES_PER_GROUP + intra_id;
+}
+
+/* Address bit manipulation helpers */
+static inline HOST_WIDE_INT
+mem_shared_set_cross_core_bit (HOST_WIDE_INT addr)
+{
+  return addr | (1LL << CROSS_CORE_ACCESS_BIT);
+}
+
+static inline HOST_WIDE_INT
+mem_shared_clear_reserved_bit (HOST_WIDE_INT addr)
+{
+  return addr & ~(1LL << RESERVED_BIT);
+}
+
+static inline HOST_WIDE_INT
+mem_shared_set_group_bits (HOST_WIDE_INT addr, unsigned int group_id)
+{
+  /* Clear existing group bits and set new ones */
+  addr &= ~(((1LL << (CORE_GROUP_END_BIT - CORE_GROUP_START_BIT + 1)) - 1) << CORE_GROUP_START_BIT);
+  return addr | ((HOST_WIDE_INT)group_id << CORE_GROUP_START_BIT);
+}
+
+static inline HOST_WIDE_INT
+mem_shared_set_intra_id_bit (HOST_WIDE_INT addr, unsigned int intra_id)
+{
+  if (intra_id)
+    return addr | (1LL << INTRA_GROUP_ID_BIT);
+  else
+    return addr & ~(1LL << INTRA_GROUP_ID_BIT);
 }
 
 #endif /* GCC_MEM_SHARED_H */

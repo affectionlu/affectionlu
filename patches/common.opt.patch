@@ -1,0 +1,21 @@
+--- a/gcc/common.opt
++++ b/gcc/common.opt
+@@ -1234,6 +1234,18 @@ fmem-shared
+ Common Var(flag_mem_shared) Init(0)
+ Enable mem_shared keyword support for multi-core shared memory programming.
+ 
++fmem-shared-core-num=
++Common Joined RejectNegative UInteger Var(mem_shared_core_num) Init(108)
++Specify the number of cores participating in mem_shared memory allocation (default: 108, max: 108).
++
++fmem-shared-core-size=
++Common Joined RejectNegative UInteger Var(mem_shared_core_size) Init(2048)
++Specify the size of shared memory per core in bytes (default: 2048, max: 20480).
++
++fdump-mem-shared
++Common Var(flag_dump_mem_shared) Init(0)
++Enable detailed debug output for mem_shared memory allocation and address generation.
++
+ fmemcpy-strategy=
+ Common Joined RejectNegative Enum(memcpy_strategy) Var(flag_memcpy_strategy) Init(MEMCPY_STRATEGY_REP_BYTE)
+ The strategy for implementing memcpy/memmove/memset.
