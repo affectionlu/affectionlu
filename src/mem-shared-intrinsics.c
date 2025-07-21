@@ -75,12 +75,31 @@ mem_shared_detect_intrinsic (tree fndecl)
   return MEM_SHARED_INTRINSIC_UNKNOWN;
 }
 
-/* Check if a call expression is an intrinsic call targeting mem_shared data */
+/* Extract mem_shared variable from an argument expression */
+static tree
+extract_mem_shared_var (tree arg)
+{
+  /* Handle address-of expressions */
+  if (TREE_CODE (arg) == ADDR_EXPR)
+    arg = TREE_OPERAND (arg, 0);
+    
+  /* Handle array references */
+  while (TREE_CODE (arg) == ARRAY_REF)
+    arg = TREE_OPERAND (arg, 0);
+    
+  if (TREE_CODE (arg) == VAR_DECL && mem_shared_decl_p (arg))
+    return arg;
+    
+  return NULL_TREE;
+}
+
+/* Check if a call expression involves mem_shared data */
 bool
 mem_shared_is_intrinsic_call (tree call_expr)
 {
-  tree fndecl, target;
+  tree fndecl;
   mem_shared_intrinsic_type_t type;
+  unsigned int i, nargs;
   
   if (TREE_CODE (call_expr) != CALL_EXPR)
     return false;
@@ -93,16 +112,23 @@ mem_shared_is_intrinsic_call (tree call_expr)
   if (type == MEM_SHARED_INTRINSIC_UNKNOWN)
     return false;
     
-  /* Check if any argument points to mem_shared data */
-  target = mem_shared_get_target_from_intrinsic (call_expr);
-  return target && mem_shared_decl_p (target);
+  /* Check if any argument involves mem_shared data */
+  nargs = call_expr_nargs (call_expr);
+  for (i = 0; i < nargs; i++)
+    {
+      tree arg = CALL_EXPR_ARG (call_expr, i);
+      if (extract_mem_shared_var (arg))
+        return true;
+    }
+    
+  return false;
 }
 
-/* Extract the target mem_shared variable from intrinsic call */
+/* Extract the target and source mem_shared variables from intrinsic call */
 tree
 mem_shared_get_target_from_intrinsic (tree call_expr)
 {
-  tree fndecl, arg0;
+  tree fndecl;
   mem_shared_intrinsic_type_t type;
   
   if (TREE_CODE (call_expr) != CALL_EXPR)
@@ -120,28 +146,63 @@ mem_shared_get_target_from_intrinsic (tree call_expr)
   if (call_expr_nargs (call_expr) < 1)
     return NULL_TREE;
     
-  arg0 = CALL_EXPR_ARG (call_expr, 0);
+  return extract_mem_shared_var (CALL_EXPR_ARG (call_expr, 0));
+}
+
+/* Get source mem_shared variable from intrinsic call */
+tree
+mem_shared_get_source_from_intrinsic (tree call_expr)
+{
+  tree fndecl;
+  mem_shared_intrinsic_type_t type;
+  unsigned int src_arg_index;
   
-  /* Handle address-of expressions */
-  if (TREE_CODE (arg0) == ADDR_EXPR)
-    arg0 = TREE_OPERAND (arg0, 0);
+  if (TREE_CODE (call_expr) != CALL_EXPR)
+    return NULL_TREE;
     
-  /* Handle array references */
-  while (TREE_CODE (arg0) == ARRAY_REF)
-    arg0 = TREE_OPERAND (arg0, 0);
+  fndecl = get_callee_fndecl (call_expr);
+  if (!fndecl)
+    return NULL_TREE;
     
-  if (TREE_CODE (arg0) == VAR_DECL && mem_shared_decl_p (arg0))
-    return arg0;
+  type = mem_shared_detect_intrinsic (fndecl);
+  
+  /* Determine source argument index based on function type */
+  switch (type)
+    {
+    case MEM_SHARED_INTRINSIC_MEMCPY:
+    case MEM_SHARED_INTRINSIC_MEMMOVE:
+    case MEM_SHARED_INTRINSIC_STRCPY:
+    case MEM_SHARED_INTRINSIC_STRNCPY:
+    case MEM_SHARED_INTRINSIC_STRCMP:
+    case MEM_SHARED_INTRINSIC_STRNCMP:
+    case MEM_SHARED_INTRINSIC_MEMCMP:
+      src_arg_index = 1;  /* Second argument is source */
+      break;
+      
+    case MEM_SHARED_INTRINSIC_BCOPY:
+      src_arg_index = 0;  /* First argument is source for bcopy */
+      break;
+      
+    case MEM_SHARED_INTRINSIC_STRLEN:
+      src_arg_index = 0;  /* First argument is source for strlen */
+      break;
+      
+    default:
+      return NULL_TREE;  /* No source argument */
+    }
     
-  return NULL_TREE;
+  if (call_expr_nargs (call_expr) <= src_arg_index)
+    return NULL_TREE;
+    
+  return extract_mem_shared_var (CALL_EXPR_ARG (call_expr, src_arg_index));
 }
 
 /* Analyze intrinsic call and populate context */
 bool
 mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_t *ctx)
 {
-  tree fndecl, target;
-  mem_shared_info_t *info;
+  tree fndecl, target, source;
+  mem_shared_info_t *target_info = NULL, *source_info = NULL;
   
   memset (ctx, 0, sizeof (*ctx));
   
@@ -153,17 +214,32 @@ mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_
   if (ctx->type == MEM_SHARED_INTRINSIC_UNKNOWN)
     return false;
     
+  /* Get target and source variables */
   target = mem_shared_get_target_from_intrinsic (call_expr);
-  if (!target)
+  source = mem_shared_get_source_from_intrinsic (call_expr);
+  
+  /* At least one must be mem_shared */
+  if (!target && !source)
     return false;
     
   ctx->target_decl = target;
-  info = mem_shared_get_info (target);
-  if (!info)
-    return false;
-    
-  ctx->is_distributed = info->is_distributed;
+  ctx->source_decl = source;
   
+  /* Get allocation info */
+  if (target)
+    {
+      target_info = mem_shared_get_info (target);
+      if (target_info)
+        ctx->target_is_distributed = target_info->is_distributed;
+    }
+    
+  if (source)
+    {
+      source_info = mem_shared_get_info (source);
+      if (source_info)
+        ctx->source_is_distributed = source_info->is_distributed;
+    }
+    
   /* Extract arguments based on intrinsic type */
   switch (ctx->type)
     {
@@ -179,12 +255,20 @@ mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_
       
     case MEM_SHARED_INTRINSIC_MEMCPY:
     case MEM_SHARED_INTRINSIC_MEMMOVE:
-    case MEM_SHARED_INTRINSIC_BCOPY:
       if (call_expr_nargs (call_expr) >= 2)
         {
           ctx->src_arg = CALL_EXPR_ARG (call_expr, 1);
           if (call_expr_nargs (call_expr) >= 3)
             ctx->size_arg = CALL_EXPR_ARG (call_expr, 2);
+        }
+      break;
+      
+    case MEM_SHARED_INTRINSIC_BCOPY:
+      if (call_expr_nargs (call_expr) >= 3)
+        {
+          ctx->src_arg = CALL_EXPR_ARG (call_expr, 0);   /* src is first for bcopy */
+          ctx->target_decl = extract_mem_shared_var (CALL_EXPR_ARG (call_expr, 1)); /* dst is second */
+          ctx->size_arg = CALL_EXPR_ARG (call_expr, 2);
         }
       break;
       
@@ -205,7 +289,8 @@ mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_
       break;
       
     case MEM_SHARED_INTRINSIC_STRLEN:
-      /* No additional arguments needed */
+      /* Source is the only argument */
+      ctx->src_arg = CALL_EXPR_ARG (call_expr, 0);
       break;
       
     default:
@@ -219,58 +304,115 @@ mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_
 mem_shared_chunk_op_t *
 mem_shared_generate_chunk_operations (mem_shared_intrinsic_context_t *ctx)
 {
-  mem_shared_info_t *info;
+  mem_shared_info_t *target_info = NULL, *source_info = NULL;
   mem_shared_chunk_op_t *ops = NULL, *current_op;
   unsigned int i, total_size, processed_size = 0;
+  unsigned int num_chunks = 1;
+  bool is_distributed = false;
   
-  info = mem_shared_get_info (ctx->target_decl);
-  if (!info)
-    return NULL;
+  /* Get allocation info for target and source */
+  if (ctx->target_decl)
+    {
+      target_info = mem_shared_get_info (ctx->target_decl);
+      if (target_info && target_info->is_distributed)
+        {
+          is_distributed = true;
+          num_chunks = mem_shared_num_cores;
+        }
+    }
+    
+  if (ctx->source_decl)
+    {
+      source_info = mem_shared_get_info (ctx->source_decl);
+      if (source_info && source_info->is_distributed)
+        {
+          is_distributed = true;
+          num_chunks = mem_shared_num_cores;
+        }
+    }
     
   /* Calculate total operation size */
   if (ctx->size_arg && tree_fits_uhwi_p (ctx->size_arg))
     total_size = tree_to_uhwi (ctx->size_arg);
-  else if (mem_shared_needs_size_calculation (ctx->type))
-    {
-      /* For string operations, we'll need runtime size calculation */
-      total_size = info->size; /* Use full variable size as fallback */
-    }
+  else if (target_info)
+    total_size = target_info->size;
+  else if (source_info)
+    total_size = source_info->size;
   else
-    total_size = info->size;
+    return NULL;
     
-  if (!ctx->is_distributed)
+  ctx->num_chunks = 0;
+    
+  if (!is_distributed)
     {
-      /* Single core operation */
+      /* Single chunk operation */
       ops = XNEW (mem_shared_chunk_op_t);
-      ops->target_core = info->target_core;
-      ops->local_offset = info->start_offset;
+      ops->target_core = target_info ? target_info->target_core : 0;
+      ops->source_core = source_info ? source_info->target_core : 0;
+      ops->target_offset = target_info ? target_info->start_offset : 0;
+      ops->source_offset = source_info ? source_info->start_offset : 0;
       ops->chunk_size = total_size;
       ops->next = NULL;
       ctx->num_chunks = 1;
       return ops;
     }
     
-  /* Generate operations for each core */
-  for (i = 0; i < mem_shared_num_cores && processed_size < total_size; i++)
+  /* Generate operations for distributed data */
+  unsigned int chunk_size = total_size / num_chunks;
+  
+  for (i = 0; i < num_chunks && processed_size < total_size; i++)
     {
-      unsigned int chunk_size = info->chunk_size;
+      unsigned int this_chunk_size = chunk_size;
       
       /* Adjust chunk size for last chunk */
       if (processed_size + chunk_size > total_size)
-        chunk_size = total_size - processed_size;
+        this_chunk_size = total_size - processed_size;
         
-      if (chunk_size == 0)
+      if (this_chunk_size == 0)
         break;
         
       /* Create chunk operation */
       current_op = XNEW (mem_shared_chunk_op_t);
-      current_op->target_core = (info->target_core + i) % mem_shared_num_cores;
-      current_op->local_offset = processed_size % info->chunk_size;
-      current_op->chunk_size = chunk_size;
+      
+      /* Calculate target core and offset */
+      if (target_info && target_info->is_distributed)
+        {
+          current_op->target_core = (target_info->target_core + i) % mem_shared_num_cores;
+          current_op->target_offset = target_info->start_offset + (processed_size % target_info->chunk_size);
+        }
+      else if (target_info)
+        {
+          current_op->target_core = target_info->target_core;
+          current_op->target_offset = target_info->start_offset + processed_size;
+        }
+      else
+        {
+          current_op->target_core = 0;
+          current_op->target_offset = processed_size;
+        }
+        
+      /* Calculate source core and offset */
+      if (source_info && source_info->is_distributed)
+        {
+          current_op->source_core = (source_info->target_core + i) % mem_shared_num_cores;
+          current_op->source_offset = source_info->start_offset + (processed_size % source_info->chunk_size);
+        }
+      else if (source_info)
+        {
+          current_op->source_core = source_info->target_core;
+          current_op->source_offset = source_info->start_offset + processed_size;
+        }
+      else
+        {
+          current_op->source_core = 0;
+          current_op->source_offset = processed_size;
+        }
+        
+      current_op->chunk_size = this_chunk_size;
       current_op->next = ops;
       ops = current_op;
       
-      processed_size += chunk_size;
+      processed_size += this_chunk_size;
       ctx->num_chunks++;
     }
     
@@ -363,7 +505,7 @@ mem_shared_expand_memset (mem_shared_intrinsic_context_t *ctx)
 {
   mem_shared_chunk_op_t *ops, *current_op;
   tree stmt_list = NULL_TREE;
-  tree base_addr, target_addr;
+  tree base_addr;
   
   ops = mem_shared_generate_chunk_operations (ctx);
   if (!ops)
@@ -380,7 +522,7 @@ mem_shared_expand_memset (mem_shared_intrinsic_context_t *ctx)
       /* Calculate chunk address */
       chunk_addr = mem_shared_build_chunk_address (base_addr, 
                                                   current_op->target_core,
-                                                  current_op->local_offset);
+                                                  current_op->target_offset);
       
       /* Build chunk size expression */
       chunk_size = build_int_cst (sizetype, current_op->chunk_size);
@@ -397,7 +539,7 @@ mem_shared_expand_memset (mem_shared_intrinsic_context_t *ctx)
         
       if (flag_dump_mem_shared)
         fprintf (stderr, "[mem_shared] Generated memset for core %u, offset 0x%x, size %u\n",
-                current_op->target_core, current_op->local_offset, current_op->chunk_size);
+                current_op->target_core, current_op->target_offset, current_op->chunk_size);
     }
     
   mem_shared_free_chunk_operations (ops);
@@ -410,42 +552,59 @@ mem_shared_expand_memcpy (mem_shared_intrinsic_context_t *ctx)
 {
   mem_shared_chunk_op_t *ops, *current_op;
   tree stmt_list = NULL_TREE;
-  tree base_addr, src_base;
-  unsigned int src_offset = 0;
+  tree target_base = NULL, source_base = NULL;
   
   ops = mem_shared_generate_chunk_operations (ctx);
   if (!ops)
     return NULL_TREE;
     
   /* Get base addresses */
-  base_addr = build_fold_addr_expr (ctx->target_decl);
-  src_base = ctx->src_arg;
-  
+  if (ctx->target_decl)
+    target_base = build_fold_addr_expr (ctx->target_decl);
+  if (ctx->source_decl)
+    source_base = build_fold_addr_expr (ctx->source_decl);
+  else
+    source_base = ctx->src_arg;  /* Regular memory source */
+    
   /* Generate memcpy call for each chunk */
   for (current_op = ops; current_op; current_op = current_op->next)
     {
-      tree chunk_addr, src_addr, chunk_size, memcpy_call;
+      tree target_addr, source_addr, chunk_size, memcpy_call;
       
-      /* Calculate destination chunk address */
-      chunk_addr = mem_shared_build_chunk_address (base_addr,
-                                                  current_op->target_core,
-                                                  current_op->local_offset);
-      
-      /* Calculate source address (assume source is regular memory) */
-      if (src_offset > 0)
+      /* Calculate target address */
+      if (ctx->target_decl && mem_shared_decl_p (ctx->target_decl))
         {
-          tree offset_expr = build_int_cst (sizetype, src_offset);
-          src_addr = fold_build_pointer_plus (src_base, offset_expr);
+          target_addr = mem_shared_build_chunk_address (target_base,
+                                                       current_op->target_core,
+                                                       current_op->target_offset);
         }
       else
-        src_addr = src_base;
+        {
+          /* Regular memory target */
+          tree offset_expr = build_int_cst (sizetype, current_op->target_offset);
+          target_addr = fold_build_pointer_plus (target_base, offset_expr);
+        }
+        
+      /* Calculate source address */
+      if (ctx->source_decl && mem_shared_decl_p (ctx->source_decl))
+        {
+          source_addr = mem_shared_build_chunk_address (source_base,
+                                                       current_op->source_core,
+                                                       current_op->source_offset);
+        }
+      else
+        {
+          /* Regular memory source */
+          tree offset_expr = build_int_cst (sizetype, current_op->source_offset);
+          source_addr = fold_build_pointer_plus (source_base, offset_expr);
+        }
         
       /* Build chunk size expression */
       chunk_size = build_int_cst (sizetype, current_op->chunk_size);
       
       /* Create memcpy call for this chunk */
-      memcpy_call = mem_shared_build_intrinsic_call ("memcpy", chunk_addr,
-                                                     src_addr, chunk_size);
+      memcpy_call = mem_shared_build_intrinsic_call ("memcpy", target_addr,
+                                                     source_addr, chunk_size);
       
       /* Add to statement list */
       if (stmt_list)
@@ -453,11 +612,16 @@ mem_shared_expand_memcpy (mem_shared_intrinsic_context_t *ctx)
       else
         stmt_list = memcpy_call;
         
-      src_offset += current_op->chunk_size;
-      
       if (flag_dump_mem_shared)
-        fprintf (stderr, "[mem_shared] Generated memcpy for core %u, offset 0x%x, size %u\n",
-                current_op->target_core, current_op->local_offset, current_op->chunk_size);
+        {
+          if (ctx->target_decl && mem_shared_decl_p (ctx->target_decl))
+            fprintf (stderr, "[mem_shared] Generated memcpy target: core %u, offset 0x%x",
+                    current_op->target_core, current_op->target_offset);
+          if (ctx->source_decl && mem_shared_decl_p (ctx->source_decl))
+            fprintf (stderr, ", source: core %u, offset 0x%x",
+                    current_op->source_core, current_op->source_offset);
+          fprintf (stderr, ", size %u\n", current_op->chunk_size);
+        }
     }
     
   mem_shared_free_chunk_operations (ops);
@@ -498,9 +662,19 @@ mem_shared_replace_intrinsic_call (tree call_expr)
     }
     
   if (replacement && flag_dump_mem_shared)
-    fprintf (stderr, "[mem_shared] Replaced %s call with %u chunk operations\n",
-            IDENTIFIER_POINTER (DECL_NAME (get_callee_fndecl (call_expr))),
-            ctx.num_chunks);
+    {
+      const char *operation_desc = "unknown";
+      if (ctx.target_decl && ctx.source_decl)
+        operation_desc = "mem_shared to mem_shared";
+      else if (ctx.target_decl)
+        operation_desc = "regular to mem_shared";
+      else if (ctx.source_decl)
+        operation_desc = "mem_shared to regular";
+        
+      fprintf (stderr, "[mem_shared] Replaced %s call (%s) with %u chunk operations\n",
+              IDENTIFIER_POINTER (DECL_NAME (get_callee_fndecl (call_expr))),
+              operation_desc, ctx.num_chunks);
+    }
             
   return replacement;
 }
@@ -509,7 +683,7 @@ mem_shared_replace_intrinsic_call (tree call_expr)
 void
 mem_shared_warn_intrinsic_performance (tree call_expr, mem_shared_intrinsic_context_t *ctx)
 {
-  if (ctx->is_distributed && ctx->num_chunks > 4)
+  if (ctx->num_chunks > 4)
     {
       warning_at (EXPR_LOCATION (call_expr), 0,
                  "mem_shared intrinsic operation will generate %u separate calls "

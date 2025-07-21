@@ -41,7 +41,9 @@ typedef enum {
 /* Chunk operation descriptor for distributed operations */
 typedef struct mem_shared_chunk_op {
   unsigned int target_core;        /* Target core for this chunk */
-  unsigned int local_offset;       /* Offset within target core */
+  unsigned int source_core;        /* Source core for this chunk */
+  unsigned int target_offset;      /* Target offset within core */
+  unsigned int source_offset;      /* Source offset within core */
   unsigned int chunk_size;         /* Size of this chunk */
   void *src_ptr;                  /* Source pointer (for copy operations) */
   void *dst_ptr;                  /* Destination pointer */
@@ -52,12 +54,14 @@ typedef struct mem_shared_chunk_op {
 typedef struct {
   mem_shared_intrinsic_type_t type;
   tree target_decl;               /* Target mem_shared variable */
+  tree source_decl;               /* Source mem_shared variable */
   tree size_arg;                  /* Size argument */
   tree value_arg;                 /* Value argument (for memset) */
   tree src_arg;                   /* Source argument (for copy ops) */
   mem_shared_chunk_op_t *chunk_ops; /* List of chunk operations */
   unsigned int num_chunks;        /* Number of chunk operations */
-  bool is_distributed;            /* Whether target is distributed */
+  bool target_is_distributed;     /* Whether target is distributed */
+  bool source_is_distributed;     /* Whether source is distributed */
 } mem_shared_intrinsic_context_t;
 
 /* Function prototypes */
@@ -66,6 +70,7 @@ typedef struct {
 extern mem_shared_intrinsic_type_t mem_shared_detect_intrinsic (tree fndecl);
 extern bool mem_shared_is_intrinsic_call (tree call_expr);
 extern tree mem_shared_get_target_from_intrinsic (tree call_expr);
+extern tree mem_shared_get_source_from_intrinsic (tree call_expr);
 extern bool mem_shared_analyze_intrinsic_call (tree call_expr, 
                                               mem_shared_intrinsic_context_t *ctx);
 
@@ -142,6 +147,20 @@ mem_shared_needs_size_calculation (mem_shared_intrinsic_type_t type)
   return (type == MEM_SHARED_INTRINSIC_STRLEN ||
           type == MEM_SHARED_INTRINSIC_STRCPY ||
           type == MEM_SHARED_INTRINSIC_STRCMP);
+}
+
+static inline bool
+mem_shared_has_source_operand (mem_shared_intrinsic_type_t type)
+{
+  return (type == MEM_SHARED_INTRINSIC_MEMCPY ||
+          type == MEM_SHARED_INTRINSIC_MEMMOVE ||
+          type == MEM_SHARED_INTRINSIC_BCOPY ||
+          type == MEM_SHARED_INTRINSIC_STRCPY ||
+          type == MEM_SHARED_INTRINSIC_STRNCPY ||
+          type == MEM_SHARED_INTRINSIC_STRCMP ||
+          type == MEM_SHARED_INTRINSIC_STRNCMP ||
+          type == MEM_SHARED_INTRINSIC_MEMCMP ||
+          type == MEM_SHARED_INTRINSIC_STRLEN);
 }
 
 #endif /* GCC_MEM_SHARED_INTRINSICS_H */
