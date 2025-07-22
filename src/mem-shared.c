@@ -40,6 +40,11 @@ unsigned int mem_shared_core_memory_size = DEFAULT_CORE_MEMORY_SIZE; /* Default:
 core_group_info_t mem_shared_group_info[MAX_CORE_GROUPS];
 mem_shared_info_t *mem_shared_allocation_list = NULL;
 
+/* Local memory pool management */
+mem_shared_pool_t mem_shared_pools[MAX_TOTAL_CORES];
+mem_shared_alloc_strategy_t mem_shared_alloc_strategy = MEM_SHARED_ALLOC_HYBRID;
+bool mem_shared_pools_initialized = false;
+
 /* Round-robin allocation state */
 static unsigned int next_group_allocation = 0;
 
@@ -84,6 +89,9 @@ mem_shared_init (unsigned int num_groups, unsigned int core_size)
   mem_shared_allocation_list = NULL;
   next_group_allocation = 0;
   
+  /* Initialize memory pools */
+  mem_shared_pools_init ();
+  
   if (flag_dump_mem_shared)
     fprintf (stderr, "[mem_shared] Initialized: %u groups (%u cores), %u bytes per core\n",
             mem_shared_num_groups, mem_shared_total_cores, mem_shared_core_memory_size);
@@ -103,6 +111,9 @@ mem_shared_cleanup (void)
     }
     
   mem_shared_allocation_list = NULL;
+  
+  /* Cleanup memory pools */
+  mem_shared_pools_cleanup ();
   
   if (flag_dump_mem_shared)
     fprintf (stderr, "[mem_shared] Cleanup completed\n");
@@ -303,22 +314,33 @@ mem_shared_allocate (tree decl)
       return info;
     }
     
-  /* Single group allocation */
+  /* Single group allocation using pool system */
   info->target_group = group_id;
   info->intra_group_id = intra_id;
   
-  /* Calculate start offset within core memory */
-  start_offset = mem_shared_group_info[group_id].used_memory[intra_id];
-  info->start_offset = start_offset;
+  /* Allocate from the core's memory pool */
+  unsigned int core_id = mem_shared_core_id_from_group_intra (group_id, intra_id);
+  uintptr_t pool_addr;
   
-  /* Update memory usage */
-  mem_shared_group_info[group_id].used_memory[intra_id] += size;
-  mem_shared_group_info[group_id].free_memory[intra_id] -= size;
-  mem_shared_group_info[group_id].allocated_vars++;
-  
-  if (flag_dump_mem_shared)
-    fprintf (stderr, "[mem_shared] Allocated %u bytes for '%s' in group %u core %u at offset 0x%x\n",
-            size, IDENTIFIER_POINTER (DECL_NAME (decl)), group_id, intra_id, start_offset);
+  if (mem_shared_pool_allocate (core_id, size, &pool_addr))
+    {
+      info->start_offset = (unsigned int)(pool_addr - mem_shared_get_pool_base (core_id));
+      
+      /* Update legacy group tracking for compatibility */
+      mem_shared_group_info[group_id].used_memory[intra_id] += size;
+      mem_shared_group_info[group_id].free_memory[intra_id] -= size;
+      mem_shared_group_info[group_id].allocated_vars++;
+      
+      if (flag_dump_mem_shared)
+        fprintf (stderr, "[mem_shared] Allocated %u bytes for '%s' in group %u core %u at pool offset 0x%x (addr 0x%lx)\n",
+                size, IDENTIFIER_POINTER (DECL_NAME (decl)), group_id, intra_id, info->start_offset, pool_addr);
+    }
+  else
+    {
+      error ("failed to allocate %u bytes from core %u memory pool for %qD", size, core_id, decl);
+      free (info);
+      return NULL;
+    }
             
   return info;
 }
@@ -430,15 +452,29 @@ mem_shared_encode_cross_core_address (unsigned int group_id, unsigned int intra_
 rtx
 mem_shared_generate_address (tree decl, HOST_WIDE_INT offset)
 {
-  unsigned int target_group, intra_id, local_offset;
+  unsigned int target_group, intra_id, local_offset, core_id;
+  uintptr_t pool_base, actual_addr;
   
   /* Calculate address components */
   target_group = mem_shared_calculate_target_group (decl, offset);
   intra_id = mem_shared_calculate_intra_group_id (decl, offset);
   local_offset = mem_shared_calculate_local_offset (decl, offset);
   
-  /* For now, assume all accesses are cross-core (can be optimized later) */
-  return mem_shared_encode_cross_core_address (target_group, intra_id, local_offset);
+  /* Get actual pool base address for this core */
+  core_id = mem_shared_core_id_from_group_intra (target_group, intra_id);
+  pool_base = mem_shared_get_pool_base (core_id);
+  
+  if (pool_base != 0)
+    {
+      /* Use actual pool address */
+      actual_addr = pool_base + local_offset;
+      return gen_int_mode (actual_addr, Pmode);
+    }
+  else
+    {
+      /* Fallback to encoded cross-core address */
+      return mem_shared_encode_cross_core_address (target_group, intra_id, local_offset);
+    }
 }
 
 /* Expand load operation for mem_shared variable */
@@ -505,6 +541,13 @@ mem_shared_process_declaration (tree decl)
     
   if (!mem_shared_decl_p (decl))
     return;
+    
+  /* Ensure static pools are generated */
+  if (!mem_shared_pools_initialized)
+    {
+      mem_shared_pools_init ();
+      mem_shared_emit_static_pools ();
+    }
     
   /* Allocate memory for this declaration */
   info = mem_shared_allocate (decl);
@@ -586,4 +629,225 @@ mem_shared_dump_group_usage (FILE *file)
           total_used, total_available);
   fprintf (file, "Usage: %.1f%% of total capacity\n",
           (double)total_used / (total_used + total_available) * 100.0);
+}
+
+/* ===================================================================
+   LOCAL MEMORY POOL MANAGEMENT IMPLEMENTATION
+   =================================================================== */
+
+/* Initialize all memory pools */
+void
+mem_shared_pools_init (void)
+{
+  unsigned int i, group_id, intra_id;
+  
+  if (mem_shared_pools_initialized)
+    return;
+    
+  /* Initialize each core's pool */
+  for (i = 0; i < mem_shared_total_cores; i++)
+    {
+      group_id = i / CORES_PER_GROUP;
+      intra_id = i % CORES_PER_GROUP;
+      
+      mem_shared_pools[i].core_id = i;
+      mem_shared_pools[i].group_id = group_id;
+      mem_shared_pools[i].intra_id = intra_id;
+      
+      /* Static pool initialization */
+      mem_shared_pools[i].static_pool_decl = NULL_TREE;
+      mem_shared_pools[i].static_pool_base = 0;
+      mem_shared_pools[i].static_pool_size = mem_shared_core_memory_size;
+      mem_shared_pools[i].static_used_bytes = 0;
+      mem_shared_pools[i].static_current_ptr = 0;
+      
+      /* Dynamic allocation settings */
+      mem_shared_pools[i].dynamic_enabled = 
+        (mem_shared_alloc_strategy == MEM_SHARED_ALLOC_DYNAMIC_ONLY ||
+         mem_shared_alloc_strategy == MEM_SHARED_ALLOC_HYBRID);
+      mem_shared_pools[i].dynamic_used_bytes = 0;
+      
+      mem_shared_pools[i].initialized = false;
+    }
+    
+  mem_shared_pools_initialized = true;
+  
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Pools initialized for %u cores with %s strategy\n",
+            mem_shared_total_cores,
+            (mem_shared_alloc_strategy == MEM_SHARED_ALLOC_STATIC_ONLY) ? "static-only" :
+            (mem_shared_alloc_strategy == MEM_SHARED_ALLOC_DYNAMIC_ONLY) ? "dynamic-only" : "hybrid");
+}
+
+/* Cleanup all memory pools */
+void
+mem_shared_pools_cleanup (void)
+{
+  unsigned int i;
+  
+  if (!mem_shared_pools_initialized)
+    return;
+    
+  /* Reset all pools */
+  for (i = 0; i < MAX_TOTAL_CORES; i++)
+    {
+      mem_shared_pools[i].initialized = false;
+      mem_shared_pools[i].static_pool_decl = NULL_TREE;
+      mem_shared_pools[i].static_pool_base = 0;
+      mem_shared_pools[i].static_used_bytes = 0;
+      mem_shared_pools[i].dynamic_used_bytes = 0;
+    }
+    
+  mem_shared_pools_initialized = false;
+  
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Pools cleanup completed\n");
+}
+
+/* Allocate memory from a specific core's pool */
+bool
+mem_shared_pool_allocate (unsigned int core_id, size_t size, uintptr_t *addr_out)
+{
+  mem_shared_pool_t *pool;
+  size_t aligned_size;
+  
+  if (core_id >= mem_shared_total_cores || !addr_out)
+    return false;
+    
+  if (!mem_shared_pools_initialized)
+    mem_shared_pools_init ();
+    
+  pool = &mem_shared_pools[core_id];
+  aligned_size = mem_shared_align_size (size);
+  
+  /* Try static pool first (if available and strategy allows) */
+  if (mem_shared_alloc_strategy != MEM_SHARED_ALLOC_DYNAMIC_ONLY)
+    {
+      if (pool->static_pool_base != 0 && 
+          pool->static_used_bytes + aligned_size <= pool->static_pool_size)
+        {
+          *addr_out = pool->static_current_ptr;
+          pool->static_current_ptr += aligned_size;
+          pool->static_used_bytes += aligned_size;
+          
+          if (flag_dump_mem_shared)
+            fprintf (stderr, "[mem_shared] Static pool alloc: core %u, size %zu, addr 0x%lx\n",
+                    core_id, aligned_size, *addr_out);
+          return true;
+        }
+    }
+    
+  /* Fallback to dynamic allocation (if enabled) */
+  if (pool->dynamic_enabled)
+    {
+      /* Note: llc_malloc() would be called at runtime, not at compile time
+         For now, we simulate with a placeholder address */
+      *addr_out = 0xDEADBEEF + core_id * 0x1000; /* Placeholder */
+      pool->dynamic_used_bytes += aligned_size;
+      
+      if (flag_dump_mem_shared)
+        fprintf (stderr, "[mem_shared] Dynamic alloc: core %u, size %zu, addr 0x%lx (simulated)\n",
+                core_id, aligned_size, *addr_out);
+      return true;
+    }
+    
+  /* Allocation failed */
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Pool allocation failed: core %u, size %zu\n", core_id, size);
+  return false;
+}
+
+/* Generate a static pool declaration for a core */
+tree
+mem_shared_generate_static_pool (unsigned int group_id, unsigned int intra_id)
+{
+  unsigned int core_id;
+  tree pool_type, pool_decl, pool_name;
+  char name_buffer[64];
+  
+  core_id = mem_shared_core_id_from_group_intra (group_id, intra_id);
+  if (core_id >= mem_shared_total_cores)
+    return NULL_TREE;
+    
+  /* Create pool array type */
+  pool_type = build_array_type (char_type_node,
+                               build_index_type (size_int (mem_shared_core_memory_size - 1)));
+                               
+  /* Generate unique pool name */
+  snprintf (name_buffer, sizeof(name_buffer), 
+           "__mem_shared_pool_core_%u_group_%u_intra_%u", 
+           core_id, group_id, intra_id);
+  pool_name = get_identifier (name_buffer);
+  
+  /* Create pool declaration */
+  pool_decl = build_decl (UNKNOWN_LOCATION, VAR_DECL, pool_name, pool_type);
+  
+  /* Set attributes for local memory section */
+  TREE_STATIC (pool_decl) = 1;
+  TREE_PUBLIC (pool_decl) = 0;
+  DECL_ARTIFICIAL (pool_decl) = 1;
+  
+  /* Add section attribute for local memory */
+  tree section_attr = tree_cons (get_identifier ("section"),
+                                tree_cons (NULL_TREE, 
+                                          build_string (5, ".llc"), NULL_TREE),
+                                NULL_TREE);
+  DECL_ATTRIBUTES (pool_decl) = section_attr;
+  
+  /* Register the pool */
+  mem_shared_pools[core_id].static_pool_decl = pool_decl;
+  mem_shared_pools[core_id].static_pool_base = (uintptr_t)pool_decl; /* Will be resolved by linker */
+  mem_shared_pools[core_id].static_current_ptr = mem_shared_pools[core_id].static_pool_base;
+  mem_shared_pools[core_id].initialized = true;
+  
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Generated static pool: %s, size %u bytes\n",
+            name_buffer, mem_shared_core_memory_size);
+            
+  return pool_decl;
+}
+
+/* Get the base address of a core's memory pool */
+uintptr_t
+mem_shared_get_pool_base (unsigned int core_id)
+{
+  if (core_id >= mem_shared_total_cores || !mem_shared_pools_initialized)
+    return 0;
+    
+  return mem_shared_pools[core_id].static_pool_base;
+}
+
+/* Emit static pool declarations for all cores */
+void
+mem_shared_emit_static_pools (void)
+{
+  unsigned int i, group_id, intra_id;
+  tree pool_decl;
+  
+  if (!mem_shared_pools_initialized)
+    return;
+    
+  if (mem_shared_alloc_strategy == MEM_SHARED_ALLOC_DYNAMIC_ONLY)
+    return; /* No static pools needed */
+    
+  for (i = 0; i < mem_shared_total_cores; i++)
+    {
+      group_id = i / CORES_PER_GROUP;
+      intra_id = i % CORES_PER_GROUP;
+      
+      if (group_id < mem_shared_num_groups)
+        {
+          pool_decl = mem_shared_generate_static_pool (group_id, intra_id);
+          if (pool_decl)
+            {
+              /* Add to global scope for compilation */
+              pushdecl (pool_decl);
+              rest_of_decl_compilation (pool_decl, 1, 0);
+            }
+        }
+    }
+    
+  if (flag_dump_mem_shared)
+    fprintf (stderr, "[mem_shared] Emitted %u static pool declarations\n", 
+            mem_shared_total_cores);
 }

@@ -43,6 +43,34 @@ along with GCC; see the file COPYING3.  If not see
 /* Data size threshold for distribution (10KB) */
 #define DISTRIBUTION_THRESHOLD 10240
 
+/* Local memory pool allocation strategies */
+typedef enum {
+  MEM_SHARED_ALLOC_STATIC_ONLY,    /* Use only static pools */
+  MEM_SHARED_ALLOC_DYNAMIC_ONLY,   /* Use only llc_malloc() */
+  MEM_SHARED_ALLOC_HYBRID          /* Static pools with dynamic fallback */
+} mem_shared_alloc_strategy_t;
+
+/* Per-core memory pool descriptor */
+typedef struct mem_shared_pool {
+  unsigned int core_id;             /* Core ID (0-107) */
+  unsigned int group_id;            /* Core group (0-53) */
+  unsigned int intra_id;            /* Intra-group ID (0-1) */
+  
+  /* Static pool management */
+  tree static_pool_decl;            /* Static pool variable declaration */
+  uintptr_t static_pool_base;       /* Base address of static pool */
+  size_t static_pool_size;          /* Total size of static pool */
+  size_t static_used_bytes;         /* Used bytes in static pool */
+  uintptr_t static_current_ptr;     /* Current allocation pointer */
+  
+  /* Dynamic allocation tracking */
+  bool dynamic_enabled;             /* Whether dynamic allocation is enabled */
+  size_t dynamic_used_bytes;        /* Total dynamic allocations */
+  
+  /* Pool state */
+  bool initialized;                 /* Whether pool is initialized */
+} mem_shared_pool_t;
+
 /* Address encoding bit positions */
 #define CROSS_CORE_ACCESS_BIT 29     /* addr[29] = 1 for cross-core access */
 #define CORE_GROUP_START_BIT 21      /* addr[26:21] = core group number */
@@ -89,6 +117,11 @@ extern bool flag_dump_mem_shared;               /* Enable debug output */
 extern core_group_info_t mem_shared_group_info[MAX_CORE_GROUPS];
 extern mem_shared_info_t *mem_shared_allocation_list;
 
+/* Local memory pool management */
+extern mem_shared_pool_t mem_shared_pools[MAX_TOTAL_CORES];
+extern mem_shared_alloc_strategy_t mem_shared_alloc_strategy;
+extern bool mem_shared_pools_initialized;
+
 /* Function prototypes */
 
 /* Initialization and cleanup */
@@ -125,6 +158,14 @@ extern void mem_shared_process_declaration (tree decl);
 extern bool mem_shared_decl_p (tree decl);
 extern void mem_shared_dump_allocation_info (FILE *file);
 extern void mem_shared_dump_group_usage (FILE *file);
+
+/* Local memory pool management functions */
+extern void mem_shared_pools_init (void);
+extern void mem_shared_pools_cleanup (void);
+extern bool mem_shared_pool_allocate (unsigned int core_id, size_t size, uintptr_t *addr_out);
+extern tree mem_shared_generate_static_pool (unsigned int group_id, unsigned int intra_id);
+extern uintptr_t mem_shared_get_pool_base (unsigned int core_id);
+extern void mem_shared_emit_static_pools (void);
 
 /* Address encoding helper functions */
 static inline bool
@@ -180,6 +221,27 @@ mem_shared_set_intra_id_bit (HOST_WIDE_INT addr, unsigned int intra_id)
     return addr | (1LL << INTRA_GROUP_ID_BIT);
   else
     return addr & ~(1LL << INTRA_GROUP_ID_BIT);
+}
+
+/* Pool utility inline functions */
+static inline unsigned int
+mem_shared_core_id_from_group_intra (unsigned int group_id, unsigned int intra_id)
+{
+  return group_id * CORES_PER_GROUP + intra_id;
+}
+
+static inline size_t
+mem_shared_align_size (size_t size)
+{
+  return (size + 7) & ~7;  /* 8-byte alignment */
+}
+
+static inline bool
+mem_shared_core_has_pool (unsigned int core_id)
+{
+  return (core_id < MAX_TOTAL_CORES && 
+          mem_shared_pools_initialized &&
+          mem_shared_pools[core_id].initialized);
 }
 
 #endif /* GCC_MEM_SHARED_H */
