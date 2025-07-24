@@ -50,26 +50,21 @@ typedef enum {
   MEM_SHARED_ALLOC_HYBRID          /* Static pools with dynamic fallback */
 } mem_shared_alloc_strategy_t;
 
-/* Per-core memory pool descriptor */
-typedef struct mem_shared_pool {
-  unsigned int core_id;             /* Core ID (0-107) */
-  unsigned int group_id;            /* Core group (0-53) */
-  unsigned int intra_id;            /* Intra-group ID (0-1) */
-  
+/* Global memory pool descriptor - shared view across all cores */
+typedef struct mem_shared_global_pool {
   /* Static pool management */
-  tree static_pool_decl;            /* Static pool variable declaration */
-  uintptr_t static_pool_base;       /* Base address of static pool */
-  size_t static_pool_size;          /* Total size of static pool */
-  size_t static_used_bytes;         /* Used bytes in static pool */
-  uintptr_t static_current_ptr;     /* Current allocation pointer */
+  tree static_pool_decl;            /* Single static pool declaration seen by all cores */
+  uintptr_t local_pool_base;        /* Local address seen by each core (same for all) */
+  size_t pool_size;                 /* Size of each core's pool */
   
-  /* Dynamic allocation tracking */
+  /* Per-core allocation tracking */
+  size_t used_bytes[MAX_TOTAL_CORES];    /* Used bytes per core */
+  uintptr_t current_ptr[MAX_TOTAL_CORES]; /* Current allocation pointer per core */
+  
+  /* Global state */
+  bool initialized;                 /* Whether pool system is initialized */
   bool dynamic_enabled;             /* Whether dynamic allocation is enabled */
-  size_t dynamic_used_bytes;        /* Total dynamic allocations */
-  
-  /* Pool state */
-  bool initialized;                 /* Whether pool is initialized */
-} mem_shared_pool_t;
+} mem_shared_global_pool_t;
 
 /* Address encoding bit positions */
 #define CROSS_CORE_ACCESS_BIT 29     /* addr[29] = 1 for cross-core access */
@@ -118,9 +113,8 @@ extern core_group_info_t mem_shared_group_info[MAX_CORE_GROUPS];
 extern mem_shared_info_t *mem_shared_allocation_list;
 
 /* Local memory pool management */
-extern mem_shared_pool_t mem_shared_pools[MAX_TOTAL_CORES];
+extern mem_shared_global_pool_t mem_shared_global_pool;
 extern mem_shared_alloc_strategy_t mem_shared_alloc_strategy;
-extern bool mem_shared_pools_initialized;
 
 /* Function prototypes */
 
@@ -163,9 +157,9 @@ extern void mem_shared_dump_group_usage (FILE *file);
 extern void mem_shared_pools_init (void);
 extern void mem_shared_pools_cleanup (void);
 extern bool mem_shared_pool_allocate (unsigned int core_id, size_t size, uintptr_t *addr_out);
-extern tree mem_shared_generate_static_pool (unsigned int group_id, unsigned int intra_id);
-extern uintptr_t mem_shared_get_pool_base (unsigned int core_id);
-extern void mem_shared_emit_static_pools (void);
+extern tree mem_shared_generate_static_pool (void);
+extern uintptr_t mem_shared_get_pool_address_for_core (unsigned int core_id);
+extern void mem_shared_emit_static_pool (void);
 
 /* Address encoding helper functions */
 static inline bool
@@ -240,8 +234,7 @@ static inline bool
 mem_shared_core_has_pool (unsigned int core_id)
 {
   return (core_id < MAX_TOTAL_CORES && 
-          mem_shared_pools_initialized &&
-          mem_shared_pools[core_id].initialized);
+          mem_shared_global_pool.initialized);
 }
 
 #endif /* GCC_MEM_SHARED_H */
