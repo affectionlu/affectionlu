@@ -80,6 +80,17 @@ typedef enum {
   MEM_SHARED_LARGE_DATA     /* Data >= DISTRIBUTION_THRESHOLD */
 } mem_shared_category_t;
 
+/* Information about a single chunk in distributed data */
+typedef struct mem_shared_chunk_info {
+  unsigned int core_id;           /* Core ID where this chunk is allocated */
+  unsigned int group_id;          /* Core group (0-53) */
+  unsigned int intra_id;          /* Intra-group ID (0 or 1) */
+  uintptr_t local_address;        /* Local address in core's memory pool */
+  unsigned int offset_in_pool;    /* Offset within the core's memory pool */
+  unsigned int chunk_size;        /* Size of this chunk */
+  bool allocated;                 /* Whether chunk was successfully allocated */
+} mem_shared_chunk_info_t;
+
 /* Memory allocation information for each mem_shared variable */
 typedef struct mem_shared_info {
   tree decl;                      /* Variable declaration */
@@ -91,6 +102,11 @@ typedef struct mem_shared_info {
   bool is_distributed;            /* Whether data is distributed across groups */
   unsigned int num_chunks;        /* Number of chunks (for distributed data) */
   unsigned int chunk_size;        /* Size of each chunk */
+  
+  /* Distributed data chunk information */
+  mem_shared_chunk_info_t *chunks; /* Array of chunk info (for distributed data) */
+  unsigned int allocated_chunks;   /* Number of successfully allocated chunks */
+  
   struct mem_shared_info *next;   /* Next in linked list */
 } mem_shared_info_t;
 
