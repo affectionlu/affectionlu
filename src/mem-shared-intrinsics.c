@@ -214,9 +214,33 @@ mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_
   if (ctx->type == MEM_SHARED_INTRINSIC_UNKNOWN)
     return false;
     
-  /* Get target and source variables */
-  target = mem_shared_get_target_from_intrinsic (call_expr);
-  source = mem_shared_get_source_from_intrinsic (call_expr);
+  /* Get target and source variables with offset analysis */
+  tree target_pointer = NULL_TREE, source_pointer = NULL_TREE;
+  
+  /* Extract target pointer and analyze for offset */
+  if (call_expr_nargs (call_expr) >= 1)
+    {
+      target_pointer = CALL_EXPR_ARG (call_expr, 0);
+      if (!mem_shared_extract_pointer_offset (target_pointer, &target, 
+                                             &ctx->target_offset_arg, &ctx->target_offset))
+        {
+          target = mem_shared_get_target_from_intrinsic (call_expr);
+          ctx->target_offset = 0;
+        }
+    }
+  
+  /* Extract source pointer and analyze for offset */
+  unsigned int src_arg_index = (ctx->type == MEM_SHARED_INTRINSIC_BCOPY) ? 0 : 1;
+  if (call_expr_nargs (call_expr) > src_arg_index)
+    {
+      source_pointer = CALL_EXPR_ARG (call_expr, src_arg_index);
+      if (!mem_shared_extract_pointer_offset (source_pointer, &source,
+                                             &ctx->source_offset_arg, &ctx->source_offset))
+        {
+          source = mem_shared_get_source_from_intrinsic (call_expr);
+          ctx->source_offset = 0;
+        }
+    }
   
   /* At least one must be mem_shared */
   if (!target && !source)
@@ -224,6 +248,9 @@ mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_
     
   ctx->target_decl = target;
   ctx->source_decl = source;
+  
+  /* Check if this is a partial operation */
+  ctx->is_partial_operation = (ctx->target_offset != 0 || ctx->source_offset != 0);
   
   /* Get allocation info */
   if (target)
@@ -297,6 +324,17 @@ mem_shared_analyze_intrinsic_call (tree call_expr, mem_shared_intrinsic_context_
       return false;
     }
     
+  /* Calculate operation range and validate */
+  if (!mem_shared_calculate_operation_range (ctx))
+    return false;
+    
+  if (!mem_shared_validate_operation_bounds (ctx))
+    {
+      if (flag_dump_mem_shared)
+        fprintf (stderr, "[mem_shared] Operation bounds validation failed\n");
+      return false;
+    }
+    
   return true;
 }
 
@@ -343,20 +381,46 @@ mem_shared_generate_chunk_operations (mem_shared_intrinsic_context_t *ctx)
     {
       current_op = XNEW (mem_shared_chunk_op_t);
       
-      /* Calculate target core information */
+      /* Calculate target core information with partial operation support */
       if (target_is_distributed)
         {
           unsigned int target_core = i;
           current_op->target_group = target_core / CORES_PER_GROUP;
           current_op->target_intra_id = target_core % CORES_PER_GROUP;
+          
+          /* For partial operations, adjust offset and size */
+          HOST_WIDE_INT base_chunk_offset = i * target_info->chunk_size;
+          HOST_WIDE_INT operation_start = ctx->target_offset;
+          HOST_WIDE_INT operation_end = (ctx->operation_size > 0) ? 
+                                       ctx->target_offset + ctx->operation_size :
+                                       target_info->size;
+          
+          /* Check if this chunk is affected by the operation */
+          HOST_WIDE_INT chunk_start = base_chunk_offset;
+          HOST_WIDE_INT chunk_end = base_chunk_offset + target_info->chunk_size;
+          
+          if (operation_end <= chunk_start || operation_start >= chunk_end)
+            {
+              /* This chunk is not affected, skip it */
+              free (current_op);
+              continue;
+            }
+            
+          /* Calculate overlap region */
+          HOST_WIDE_INT overlap_start = MAX (operation_start, chunk_start);
+          HOST_WIDE_INT overlap_end = MIN (operation_end, chunk_end);
+          
           current_op->target_offset = target_info->start_offset + 
-                                    (i * target_info->chunk_size);
+                                    (overlap_start - chunk_start);
+          current_op->chunk_size = overlap_end - overlap_start;
         }
       else if (target_info)
         {
           current_op->target_group = target_info->target_group;
           current_op->target_intra_id = target_info->intra_group_id;
-          current_op->target_offset = target_info->start_offset;
+          current_op->target_offset = target_info->start_offset + ctx->target_offset;
+          current_op->chunk_size = (ctx->operation_size > 0) ? 
+                                  ctx->operation_size : target_info->size;
         }
       else
         {
@@ -366,27 +430,45 @@ mem_shared_generate_chunk_operations (mem_shared_intrinsic_context_t *ctx)
           current_op->target_offset = 0;
         }
         
-      /* Calculate source core information */
+      /* Calculate source core information with partial operation support */
       if (source_is_distributed)
         {
           unsigned int source_core = i;
           current_op->source_group = source_core / CORES_PER_GROUP;
           current_op->source_intra_id = source_core % CORES_PER_GROUP;
-          current_op->source_offset = source_info->start_offset + 
-                                    (i * source_info->chunk_size);
+          
+          /* For partial operations, adjust source offset to match target chunk */
+          HOST_WIDE_INT base_source_offset = i * source_info->chunk_size;
+          HOST_WIDE_INT source_operation_start = ctx->source_offset;
+          
+          /* Map the target chunk to corresponding source region */
+          if (target_is_distributed && current_op->chunk_size > 0)
+            {
+              /* Both distributed: chunk-to-chunk mapping */
+              current_op->source_offset = source_info->start_offset + 
+                                        base_source_offset + 
+                                        (ctx->source_offset % source_info->chunk_size);
+            }
+          else
+            {
+              /* Source distributed, target not: use source offset */
+              current_op->source_offset = source_info->start_offset + 
+                                        base_source_offset + ctx->source_offset;
+            }
         }
       else if (source_info)
         {
           current_op->source_group = source_info->target_group;
           current_op->source_intra_id = source_info->intra_group_id;
-          current_op->source_offset = source_info->start_offset;
+          current_op->source_offset = source_info->start_offset + ctx->source_offset;
         }
       else
         {
-          /* Regular memory source */
+          /* Regular memory source with offset */
           current_op->source_group = 0;
           current_op->source_intra_id = 0;
-          current_op->source_offset = i * (target_info ? target_info->chunk_size : 1024);
+          current_op->source_offset = ctx->source_offset + 
+                                    (i * (current_op->chunk_size > 0 ? current_op->chunk_size : 1024));
         }
         
       /* Calculate chunk size */
@@ -704,4 +786,193 @@ mem_shared_error_unsupported_intrinsic (tree call_expr)
   error_at (EXPR_LOCATION (call_expr),
            "intrinsic function %qD not yet supported for mem_shared variables",
            fndecl);
+}
+
+/* ===================================================================
+   PARTIAL OPERATION SUPPORT IMPLEMENTATION
+   =================================================================== */
+
+/* Extract pointer offset from expressions like (data + offset) or &data[index] */
+bool
+mem_shared_extract_pointer_offset (tree pointer_expr, tree *base_decl, 
+                                 tree *offset_expr, HOST_WIDE_INT *offset_value)
+{
+  tree base = NULL_TREE;
+  tree offset = NULL_TREE;
+  HOST_WIDE_INT offset_val = 0;
+  
+  *base_decl = NULL_TREE;
+  *offset_expr = NULL_TREE;
+  *offset_value = 0;
+  
+  if (!pointer_expr)
+    return false;
+    
+  switch (TREE_CODE (pointer_expr))
+    {
+    case VAR_DECL:
+    case PARM_DECL:
+      /* Direct variable reference: data */
+      if (mem_shared_decl_p (pointer_expr))
+        {
+          *base_decl = pointer_expr;
+          *offset_value = 0;
+          return true;
+        }
+      break;
+      
+    case POINTER_PLUS_EXPR:
+      /* Pointer arithmetic: data + offset */
+      base = TREE_OPERAND (pointer_expr, 0);
+      offset = TREE_OPERAND (pointer_expr, 1);
+      
+      if (base && mem_shared_decl_p (base))
+        {
+          *base_decl = base;
+          *offset_expr = offset;
+          
+          /* Try to get constant offset */
+          if (TREE_CODE (offset) == INTEGER_CST)
+            *offset_value = tree_to_shwi (offset);
+          else
+            *offset_value = -1; /* Non-constant offset */
+          return true;
+        }
+      break;
+      
+    case ARRAY_REF:
+      /* Array reference: data[index] */
+      base = TREE_OPERAND (pointer_expr, 0);
+      tree index = TREE_OPERAND (pointer_expr, 1);
+      
+      if (base && mem_shared_decl_p (base))
+        {
+          *base_decl = base;
+          *offset_expr = index;
+          
+          /* Calculate byte offset from array index */
+          if (TREE_CODE (index) == INTEGER_CST)
+            {
+              tree element_type = TREE_TYPE (TREE_TYPE (base));
+              HOST_WIDE_INT element_size = int_size_in_bytes (element_type);
+              HOST_WIDE_INT index_val = tree_to_shwi (index);
+              *offset_value = index_val * element_size;
+            }
+          else
+            *offset_value = -1; /* Non-constant index */
+          return true;
+        }
+      break;
+      
+    case ADDR_EXPR:
+      /* Address of: &data[index] */
+      return mem_shared_extract_pointer_offset (TREE_OPERAND (pointer_expr, 0),
+                                               base_decl, offset_expr, offset_value);
+      
+    default:
+      break;
+    }
+    
+  return false;
+}
+
+/* Calculate operation range from size argument */
+bool
+mem_shared_calculate_operation_range (mem_shared_intrinsic_context_t *ctx)
+{
+  if (!ctx->size_arg)
+    {
+      /* For operations without explicit size (strlen, strcpy, etc.) */
+      ctx->operation_size = -1; /* Unknown size */
+      return true;
+    }
+    
+  /* Try to get constant size */
+  if (TREE_CODE (ctx->size_arg) == INTEGER_CST)
+    {
+      ctx->operation_size = tree_to_shwi (ctx->size_arg);
+      return true;
+    }
+  else
+    {
+      /* Non-constant size - we'll handle at runtime */
+      ctx->operation_size = -1;
+      return true;
+    }
+}
+
+/* Validate operation bounds against variable sizes */
+bool
+mem_shared_validate_operation_bounds (mem_shared_intrinsic_context_t *ctx)
+{
+  mem_shared_info_t *target_info = NULL, *source_info = NULL;
+  HOST_WIDE_INT target_size = 0, source_size = 0;
+  
+  /* Get target variable size */
+  if (ctx->target_decl)
+    {
+      target_info = mem_shared_get_info (ctx->target_decl);
+      if (target_info)
+        target_size = target_info->size;
+      else
+        {
+          tree target_type = TREE_TYPE (ctx->target_decl);
+          target_size = int_size_in_bytes (target_type);
+        }
+    }
+    
+  /* Get source variable size */
+  if (ctx->source_decl)
+    {
+      source_info = mem_shared_get_info (ctx->source_decl);
+      if (source_info)
+        source_size = source_info->size;
+      else
+        {
+          tree source_type = TREE_TYPE (ctx->source_decl);
+          source_size = int_size_in_bytes (source_type);
+        }
+    }
+    
+  /* Only validate if we have constant values */
+  if (ctx->operation_size > 0)
+    {
+      /* Check target bounds */
+      if (ctx->target_decl && target_size > 0)
+        {
+          if (ctx->target_offset >= 0 && 
+              ctx->target_offset + ctx->operation_size > target_size)
+            {
+              warning (0, "mem_shared operation exceeds target variable bounds: "
+                      "offset %wd + size %wd > variable size %wd",
+                      ctx->target_offset, ctx->operation_size, target_size);
+              return false;
+            }
+        }
+        
+      /* Check source bounds */
+      if (ctx->source_decl && source_size > 0)
+        {
+          if (ctx->source_offset >= 0 &&
+              ctx->source_offset + ctx->operation_size > source_size)
+            {
+              warning (0, "mem_shared operation exceeds source variable bounds: "
+                      "offset %wd + size %wd > variable size %wd",
+                      ctx->source_offset, ctx->operation_size, source_size);
+              return false;
+            }
+        }
+    }
+    
+  if (flag_dump_mem_shared && ctx->is_partial_operation)
+    {
+      fprintf (stderr, "[mem_shared] Partial operation detected: ");
+      if (ctx->target_decl)
+        fprintf (stderr, "target offset %wd ", ctx->target_offset);
+      if (ctx->source_decl)
+        fprintf (stderr, "source offset %wd ", ctx->source_offset);
+      fprintf (stderr, "size %wd\n", ctx->operation_size);
+    }
+    
+  return true;
 }

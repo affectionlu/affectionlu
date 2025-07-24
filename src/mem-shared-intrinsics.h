@@ -60,10 +60,19 @@ typedef struct {
   tree size_arg;                  /* Size argument */
   tree value_arg;                 /* Value argument (for memset) */
   tree src_arg;                   /* Source argument (for copy ops) */
+  
+  /* Offset and range information for partial operations */
+  tree target_offset_arg;         /* Target offset from base (data + offset) */
+  tree source_offset_arg;         /* Source offset from base */
+  HOST_WIDE_INT target_offset;    /* Resolved target offset */
+  HOST_WIDE_INT source_offset;    /* Resolved source offset */
+  HOST_WIDE_INT operation_size;   /* Size of the operation */
+  
   mem_shared_chunk_op_t *chunk_ops; /* List of chunk operations */
   unsigned int num_chunks;        /* Number of chunk operations */
   bool target_is_distributed;     /* Whether target is distributed across groups */
   bool source_is_distributed;     /* Whether source is distributed across groups */
+  bool is_partial_operation;      /* Whether this is a partial operation */
 } mem_shared_intrinsic_context_t;
 
 /* Function prototypes */
@@ -75,6 +84,12 @@ extern tree mem_shared_get_target_from_intrinsic (tree call_expr);
 extern tree mem_shared_get_source_from_intrinsic (tree call_expr);
 extern bool mem_shared_analyze_intrinsic_call (tree call_expr, 
                                               mem_shared_intrinsic_context_t *ctx);
+
+/* Offset and range analysis for partial operations */
+extern bool mem_shared_extract_pointer_offset (tree pointer_expr, tree *base_decl, 
+                                              tree *offset_expr, HOST_WIDE_INT *offset_value);
+extern bool mem_shared_calculate_operation_range (mem_shared_intrinsic_context_t *ctx);
+extern bool mem_shared_validate_operation_bounds (mem_shared_intrinsic_context_t *ctx);
 
 /* Chunk operation generation */
 extern mem_shared_chunk_op_t *mem_shared_generate_chunk_operations (
