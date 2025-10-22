@@ -1,0 +1,38 @@
+--- a/gcc/c/c-decl.c
++++ b/gcc/c/c-decl.c
+@@ -67,6 +67,7 @@ along with GCC; see the file COPYING3.  If not see
+ #include "tree-iterator.h"
+ #include "omp-general.h"
+ #include "omp-offload.h"
++#include "mem-shared.h"
+ 
+ /* In grokdeclarator, distinguish syntactic contexts of declarators.  */
+ enum decl_context
+@@ -4850,6 +4851,12 @@ finish_decl (tree decl, location_t init_loc, tree init,
+       && TREE_CODE (decl) == VAR_DECL)
+     add_flexible_array_elts_to_size (decl, init);
+ 
++  /* Process mem_shared declarations during variable finalization */
++  if (TREE_CODE (decl) == VAR_DECL && 
++      lookup_attribute ("mem_shared", DECL_ATTRIBUTES (decl)))
++    {
++      mem_shared_process_declaration (decl);
++    }
++
+   if (TREE_CODE (decl) == VAR_DECL)
+     {
+       if (init && TREE_CODE (init) == CONSTRUCTOR)
+@@ -5250,6 +5257,13 @@ grokdeclarator (const struct c_declarator *declarator,
+ 	    }
+ 	}
+ 
++      /* Handle mem_shared attribute for variables during declaration parsing */
++      if (declspecs->mem_shared_p && TREE_CODE (type) != FUNCTION_TYPE)
++        {
++          tree attr = build_tree_list (get_identifier ("mem_shared"), NULL_TREE);
++          attributes = chainon (attributes, attr);
++        }
++
+       if (declspecs->thread_p)
+ 	{
+ 	  if (targetm.have_tls)

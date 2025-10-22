@@ -1,0 +1,51 @@
+--- a/gcc/config/target/target.md
++++ b/gcc/config/target/target.md
+@@ -1000,6 +1000,45 @@
+ ;;
+ ;; -------------------------------------------------------------------------
+ 
++;; -------------------------------------------------------------------------
++;; mem_shared memory access patterns
++;; -------------------------------------------------------------------------
++
++;; Expander for mem_shared load - connects high-level expansion to instruction
++(define_expand "mem_shared_load<mode>"
++  [(set (match_operand:GPR 0 "register_operand" "")
++        (mem:GPR (match_operand:P 1 "mem_shared_address_operand" "")))]
++  "TARGET_MULTICORE"
++{
++  /* This expander is called during instruction selection phase
++     when mem_shared_expand_load generates RTL patterns */
++})
++
++;; Actual instruction pattern for mem_shared load
++(define_insn "*mem_shared_load<mode>"
++  [(set (match_operand:GPR 0 "register_operand" "=r")
++        (mem:GPR (match_operand:P 1 "mem_shared_address_operand" "")))]
++  "TARGET_MULTICORE"
++  "ld.<mode>\t%0, %1\t// mem_shared load"
++  [(set_attr "type" "load")
++   (set_attr "length" "4")])
++
++;; Expander for mem_shared store
++(define_expand "mem_shared_store<mode>"
++  [(set (mem:GPR (match_operand:P 0 "mem_shared_address_operand" ""))
++        (match_operand:GPR 1 "register_operand" ""))]
++  "TARGET_MULTICORE"
++{
++  /* This expander is called during instruction selection phase
++     when mem_shared_expand_store generates RTL patterns */
++})
++
++;; Actual instruction pattern for mem_shared store  
++(define_insn "*mem_shared_store<mode>"
++  [(set (mem:GPR (match_operand:P 0 "mem_shared_address_operand" ""))
++        (match_operand:GPR 1 "register_operand" "r"))]
++  "TARGET_MULTICORE" 
++  "st.<mode>\t%1, %0\t// mem_shared store"
++  [(set_attr "type" "store")
++   (set_attr "length" "4")])
++
+ ;; -------------------------------------------------------------------------
+ ;; End of file
+ ;; -------------------------------------------------------------------------

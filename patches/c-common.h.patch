@@ -1,0 +1,20 @@
+--- a/gcc/c-family/c-common.h
++++ b/gcc/c-family/c-common.h
+@@ -105,6 +105,7 @@ enum rid
+   RID_CONSTEXPR, RID_CONSTEVAL, RID_CONSTINIT,
+   RID_CONCEPT, RID_REQUIRES,
+   
++  RID_MEM_SHARED,
+   RID_MAX,
+   
+   RID_FIRST_MODIFIER = RID_STATIC,
+@@ -823,6 +824,9 @@ extern void c_register_addr_space (const char *word, addr_space_t as);
+ extern addr_space_t c_lookup_addr_space (const char *word);
+ extern void c_common_finalize_early_debug (void);
+ 
++/* mem_shared support */
++extern void c_common_init_mem_shared (void);
++
+ /* In c-gimplify.c  */
+ extern void c_genericize (tree);
+ extern int c_gimplify_expr (tree *, gimple_seq *, gimple_seq *);

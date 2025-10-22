@@ -1,0 +1,39 @@
+--- a/gcc/c-family/c-common.c
++++ b/gcc/c-family/c-common.c
+@@ -362,6 +362,7 @@ const struct c_common_resword c_common_reswords[] =
+   { "typeof",		RID_TYPEOF,	D_ASM|D_EXT },
+   { "typeof_unqual",	RID_TYPEOF_UNQUAL, D_CONLY },
+   { "union",		RID_UNION,	0 },
++  { "mem_shared",	RID_MEM_SHARED,	D_CONLY },
+   { "unsigned",		RID_UNSIGNED,	0 },
+   { "using",		RID_USING,	D_CXX },
+   { "void",		RID_VOID,	0 },
+@@ -5458,6 +5459,19 @@ c_common_finalize_early_debug (void)
+   timevar_pop (TV_PCH_SAVE);
+ }
+
++/* Initialize mem_shared support when parsing starts */
++void
++c_common_init_mem_shared (void)
++{
++  if (flag_mem_shared)
++    {
++      /* Calculate number of groups from total cores */
++      unsigned int num_groups = (mem_shared_core_num + 1) / 2;
++      mem_shared_init (num_groups, mem_shared_core_size);
++    }
++}
++
+ /* Preprocess and parse the file.  */
+ void
+ c_common_parse_file (void)
+@@ -5467,6 +5481,9 @@ c_common_parse_file (void)
+   if (c_common_no_more_pch ())
+     return;
+
++  /* Initialize mem_shared before parsing */
++  c_common_init_mem_shared ();
++
+   fini_const_decl_processing_p = true;
+
+   the_parser = c_parser_new ();

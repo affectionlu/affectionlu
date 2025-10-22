@@ -1,0 +1,21 @@
+--- a/gcc/passes.def
++++ b/gcc/passes.def
+@@ -310,6 +310,7 @@ along with GCC; see the file COPYING3.  If not see
+   NEXT_PASS (pass_forwprop);
+   NEXT_PASS (pass_sra);
+   NEXT_PASS (pass_tail_recursion);
++  NEXT_PASS (pass_mem_shared_intrinsics);
+   NEXT_PASS (pass_merge_phi);
+   NEXT_PASS (pass_copy_prop);
+   NEXT_PASS (pass_warn_unused_result);
+
+--- a/gcc/tree-pass.h
++++ b/gcc/tree-pass.h
+@@ -428,6 +428,7 @@ extern gimple_opt_pass *make_pass_local_pure_const (gcc::context *ctxt);
+ extern gimple_opt_pass *make_pass_tracer (gcc::context *ctxt);
+ extern gimple_opt_pass *make_pass_warn_unused_result (gcc::context *ctxt);
+ extern gimple_opt_pass *make_pass_diagnose_tm_blocks (gcc::context *ctxt);
++extern gimple_opt_pass *make_pass_mem_shared_intrinsics (gcc::context *ctxt);
+ extern gimple_opt_pass *make_pass_expand_omp (gcc::context *ctxt);
+ extern gimple_opt_pass *make_pass_expand_omp_ssa (gcc::context *ctxt);
+ extern gimple_opt_pass *make_pass_object_sizes (gcc::context *ctxt);
